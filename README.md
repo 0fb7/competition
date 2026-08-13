@@ -27,7 +27,7 @@ annotations). Verified on Python 3.14 with `pygame-ce` (chosen over
 ## Project layout
 
 ```
-engine/       battle simulation — single source of truth for battle state
+engine/       battle simulation - single source of truth for battle state
   ship.py         ship physics/rules (HP, energy, movement, attack)
   sandbox.py      AST-restricted execution of team strategy code
   api.py          the only actions team code can request
@@ -62,13 +62,13 @@ tests/
   not stop a determined attacker (no memory/CPU/timeout limits). Don't
   run untrusted code from strangers on this alone.
 - **Difficulty levels are configuration only.** The engine doesn't have
-  a built-in AI opponent whose behavior scales — ships are controlled by
+  a built-in AI opponent whose behavior scales - ships are controlled by
   whatever code a team submits. Selecting a level stores it on the
   engine and displays it; it does not currently change anything.
 - **Pygame embedding is a best-effort technique** (SDL_WINDOWID), mainly
   exercised on Windows. If it fails on a given platform/driver, the
   dashboard shows an "Open Arena Window" button that launches
-  `sim/main.py` as its own process — note that process runs an
+  `sim/main.py` as its own process - note that process runs an
   independent battle, not a mirror of the dashboard's.
 - **Only 2 ships / 1 concurrent battle.** Team roster (player names) is
   static configuration, not a team-management feature.
