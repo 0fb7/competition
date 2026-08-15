@@ -30,6 +30,7 @@ RUNTIME_STATES = (IDLE, PREPARING, RUNNING, PAUSED, COMPLETED, ERROR, STOPPED)
 
 def compute_runtime_state(
     snap: dict | None, active_match_id: str | None, admin_stopped: bool, thread_crashed: bool,
+    preparing: bool = False,
 ) -> str:
     """The one function that turns real BattleRunner state into a runtime
     state label. Every branch is backed by a real, already-existing
@@ -50,9 +51,18 @@ def compute_runtime_state(
         reinvented).
     """
     if snap is None:
-        return IDLE
+        return PREPARING if preparing else IDLE
     if thread_crashed or not snap.get("engine_alive", False):
         return ERROR
+    if preparing:
+        # Phase 8 (BACKLOG #17): App._on_start_match() sets this explicitly
+        # for the real span it holds while set_team_code()/reset_battle()
+        # spawn each side's isolated worker — takes priority over a STALE
+        # snapshot from whatever the PREVIOUS match/battle left behind
+        # (which reset_battle() hasn't overwritten yet at that point), so
+        # the runtime never misreports COMPLETED/RUNNING/PAUSED from old
+        # state during this window.
+        return PREPARING
     if admin_stopped:
         return STOPPED
     if snap["ended"]:

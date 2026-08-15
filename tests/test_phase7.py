@@ -136,7 +136,16 @@ def test_execution_timeout_is_configurable_single_source_of_truth():
 
 # ============================================================== 3-5 worker lifecycle
 def test_worker_process_termination_on_timeout():
-    w = DecideWorker(HANG_CODE, timeout=0.5)
+    # timeout=1.5s (not the tighter 0.5s this originally used) — under
+    # sustained multiprocessing load from the many DecideWorkers spawned
+    # earlier in this same test file/process, a too-tight value can let
+    # STARTUP itself (governed by the same `timeout`, see DecideWorker._start)
+    # consume most of the budget, leaving no headroom to actually observe
+    # hang-detection before the assertion runs. Same class of flakiness
+    # already diagnosed and fixed for
+    # test_execution_timeout_is_configurable_single_source_of_truth below.
+    w = DecideWorker(HANG_CODE, timeout=1.5)
+    assert w.dead is False, "worker failed to start within its own startup budget"
     friendly = {"id": "alpha", "team": "A", "x": 0, "y": 0, "hp": 100, "alive": True, "attack_ready": True}
     enemies = [{"id": "beta", "team": "B", "x": 5, "y": 5, "hp": 100, "alive": True}]
     outcome = w.request(friendly, enemies, BattleConfig())

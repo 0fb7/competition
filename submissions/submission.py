@@ -73,9 +73,22 @@ class ValidationResult:
         )
 
 
+# Phase 8: structured outcome distinguishing a genuine battle loss (FAILED)
+# from the candidate's code never running to a real verdict at all (TIMEOUT,
+# ERROR). `passed` stays as a derived bool (True only for PASSED) so every
+# pre-Phase-8 caller that only ever looked at `.passed` keeps working
+# unchanged.
+TEST_PASSED = "PASSED"
+TEST_FAILED = "FAILED"
+TEST_TIMEOUT = "TIMEOUT"
+TEST_ERROR = "ERROR"
+TEST_STATUSES = (TEST_PASSED, TEST_FAILED, TEST_TIMEOUT, TEST_ERROR)
+
+
 @dataclass
 class TestResult:
     passed: bool
+    status: str = TEST_FAILED
     winner: str | None = None
     duration: float = 0.0
     errors: list[str] = field(default_factory=list)
@@ -83,13 +96,21 @@ class TestResult:
     damage_dealt: float = 0.0
     events_count: int = 0
 
+    def __post_init__(self):
+        # A result built with only `passed=True` and no explicit status
+        # (e.g. by older/simpler call sites) should still read as PASSED.
+        if self.passed and self.status == TEST_FAILED:
+            self.status = TEST_PASSED
+
     def to_dict(self) -> dict:
         return asdict(self)
 
     @staticmethod
     def from_dict(d: dict) -> "TestResult":
+        passed = d["passed"]
+        status = d.get("status") or (TEST_PASSED if passed else TEST_FAILED)
         return TestResult(
-            passed=d["passed"], winner=d.get("winner"), duration=d.get("duration", 0.0),
+            passed=passed, status=status, winner=d.get("winner"), duration=d.get("duration", 0.0),
             errors=list(d.get("errors", [])), final_hp=d.get("final_hp"),
             damage_dealt=d.get("damage_dealt", 0.0), events_count=d.get("events_count", 0),
         )

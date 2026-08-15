@@ -448,9 +448,35 @@ class TournamentService:
 
     # ---------------------------------------------------- round/bracket progress
     def _check_round_completion(self, round_id: str) -> None:
+        """Phase 8 (BACKLOG #7) — the one deterministic cancelled-match
+        policy, documented and applied identically to both round types:
+
+          - A cancelled match produces no winner, no MatchResult, and no
+            round-robin standings contribution (results/result_service.py
+            already excludes it via REAL_OUTCOMES — unchanged).
+          - Round-robin: a cancelled match still counts as "this round is
+            done" (there is no bracket advancement to protect — a
+            round-robin round is just a batch of independent matches, and
+            leaving it perpetually ACTIVE over one cancelled match would
+            only hide a genuinely finished round from the UI).
+          - Single-elimination: a round containing ANY cancelled match is
+            explicitly NEVER marked COMPLETED and NEVER advances to the
+            next round — no forfeit-to-opponent, no silently declaring the
+            other bracket survivor a "champion" just because their
+            opponent's match was cancelled (exactly the accidental-
+            champion risk this policy exists to prevent). The round stays
+            in whatever status it already had until an administrator
+            manually intervenes (e.g. by creating a replacement match) —
+            a genuinely blocked, visibly non-terminal state, never a
+            silent auto-resolution."""
         round_obj = self.repo.get_round(round_id)
         matches = self.repo.get_round_matches(round_id)
-        if not matches or not all(m.status in (M_COMPLETED, M_ERROR, M_CANCELLED) for m in matches):
+        if not matches:
+            return
+        has_cancelled = any(m.status == M_CANCELLED for m in matches)
+        if round_obj.round_type == TYPE_SINGLE_ELIMINATION and has_cancelled:
+            return  # blocked — see docstring; never auto-completes or advances
+        if not all(m.status in (M_COMPLETED, M_ERROR, M_CANCELLED) for m in matches):
             return
         self.repo.update_round(round_id, status=R_COMPLETED, ended_at=utc_now_iso())
 

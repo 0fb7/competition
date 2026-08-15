@@ -32,6 +32,7 @@ STRINGS = {
     "nav_leaderboard": {"en": "Leaderboard", "ar": "المتصدرون"},
     "nav_logs": {"en": "Battle Logs", "ar": "سجلات المعارك"},
     "nav_settings": {"en": "Settings", "ar": "الإعدادات"},
+    "not_built_yet": {"en": "Not built yet in this milestone.", "ar": "لم يُبنَ هذا القسم بعد في هذه المرحلة."},
 
     "battle_arena": {"en": "Battle Arena", "ar": "ساحة المعركة"},
     "start": {"en": "Start Battle", "ar": "بدء المعركة"},
@@ -99,6 +100,7 @@ STRINGS = {
         "en": "This change will take effect after the current battle is reset.",
         "ar": "سيصبح هذا التغيير سارياً بعد إعادة تعيين المعركة الحالية.",
     },
+    "pending_next_battle": {"en": "Pending for next battle", "ar": "معلَّق حتى المعركة القادمة"},
     "no_teams_title": {"en": "No teams yet.", "ar": "لا توجد فرق بعد."},
     "no_teams_body": {
         "en": "Create your first team to begin the competition.",
@@ -121,6 +123,13 @@ STRINGS = {
     },
     "error_ship_taken": {"en": "That ship is already assigned to another team.", "ar": "هذه السفينة معيّنة لفريق آخر بالفعل."},
     "error_generic": {"en": "Something went wrong. Please try again.", "ar": "حدث خطأ ما. حاول مرة أخرى."},
+    "startup_corrupted_data_title": {"en": "Cannot Start — Corrupted Data File", "ar": "تعذر البدء — ملف بيانات تالف"},
+    "startup_corrupted_data_body": {
+        "en": "One of the application's saved data files is corrupted and cannot be read:\n\n{detail}\n\n"
+              "No data was overwritten. Fix or move aside the affected file in the data/ folder, then restart the application.",
+        "ar": "أحد ملفات بيانات التطبيق المحفوظة تالف ولا يمكن قراءته:\n\n{detail}\n\n"
+              "لم تُستبدل أي بيانات. أصلح الملف المتأثر أو انقله من مجلد data/ ثم أعد تشغيل التطبيق.",
+    },
     "details": {"en": "Details", "ar": "التفاصيل"},
     "member_count": {"en": "Members", "ar": "الأعضاء"},
 
@@ -207,6 +216,15 @@ STRINGS = {
     "validation_passed": {"en": "Validation passed.", "ar": "نجح التحقق."},
     "test_passed": {"en": "Test passed.", "ar": "نجح الاختبار."},
     "test_failed": {"en": "Test failed.", "ar": "فشل الاختبار."},
+    "test_timeout": {
+        "en": "Test timed out — code took too long to respond.",
+        "ar": "انتهت مهلة الاختبار — استغرق الكود وقتاً طويلاً للاستجابة.",
+    },
+    "test_error": {"en": "Test error — code raised an error.", "ar": "خطأ في الاختبار — أثار الكود خطأ."},
+    "test_runner_internal_error": {
+        "en": "The test could not complete due to an internal error: {detail}",
+        "ar": "تعذر إكمال الاختبار بسبب خطأ داخلي: {detail}",
+    },
     "submitted_read_only": {"en": "Submitted — Read Only.", "ar": "تم التسليم — للقراءة فقط."},
     "draft_editable": {"en": "Draft — Editable.", "ar": "مسودة — قابلة للتعديل."},
     "active_version": {"en": "Active", "ar": "نشط"},
@@ -312,6 +330,14 @@ STRINGS = {
     "hp_remaining": {"en": "HP Remaining", "ar": "الصحة المتبقية"},
     "view_details": {"en": "View Details", "ar": "عرض التفاصيل"},
     "recent_matches": {"en": "Recent Matches", "ar": "المباريات الأخيرة"},
+    "team_performance_title": {"en": "Team Performance", "ar": "أداء الفريق"},
+    "team_id_label": {"en": "Team ID", "ar": "معرّف الفريق"},
+    "no_members_yet": {"en": "No members yet", "ar": "لا يوجد أعضاء بعد"},
+    "assigned_ship": {"en": "Assigned Ship", "ar": "السفينة المعيَّنة"},
+    "performance_stats": {"en": "All-Time Performance", "ar": "الأداء عبر كل الفترات"},
+    "total_competitions": {"en": "Competitions", "ar": "المسابقات"},
+    "errors_count": {"en": "Errors", "ar": "الأخطاء"},
+    "avg_match_duration": {"en": "Avg. Match Duration", "ar": "متوسط مدة المباراة"},
     "battle_timeline": {"en": "Battle Timeline", "ar": "الخط الزمني للمعركة"},
     "round_standings": {"en": "Round Standings", "ar": "ترتيب الجولة"},
     "advanced_teams": {"en": "Advanced", "ar": "المتأهلون"},
@@ -349,6 +375,16 @@ STRINGS = {
 
     "live_match_monitor": {"en": "Live Match Monitor", "ar": "مراقبة المباراة المباشرة"},
     "no_active_match": {"en": "No active match", "ar": "لا توجد مباراة نشطة"},
+    "preparing_workers_message": {
+        "en": "Preparing battle workers...", "ar": "جارٍ تحضير عمليات المعركة...",
+    },
+    "worker_start_failed": {
+        "en": "Unable to start match: a team's code process failed to start. The match was not started.",
+        "ar": "تعذر بدء المباراة: فشلت عملية تشغيل كود أحد الفرق. لم تبدأ المباراة.",
+    },
+    "alert_worker_start_failed": {
+        "en": "Worker startup failed — match aborted", "ar": "فشل بدء عملية التنفيذ — تم إلغاء المباراة",
+    },
     "remaining_time": {"en": "Remaining", "ar": "المتبقي"},
     "position": {"en": "Position", "ar": "الموقع"},
     "attack_cooldown_label": {"en": "Cooldown", "ar": "فترة التهدئة"},

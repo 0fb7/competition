@@ -14,7 +14,7 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t, is_rtl
 from tournament.competition import STATUS_DRAFT, STATUS_READY, STATUS_ACTIVE, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ARCHIVED, ValidationError
 from tournament.round import TYPE_ROUND_ROBIN, TYPE_SINGLE_ELIMINATION, TYPE_CUSTOM, STATUS_COMPLETED as ROUND_COMPLETED
@@ -24,10 +24,10 @@ from tournament.match import (
     OUTCOME_TEAM_A_WIN, OUTCOME_TEAM_B_WIN, OUTCOME_DRAW,
 )
 
-COMP_STATUS_KEY = {
-    STATUS_DRAFT: "draft", STATUS_READY: "ready", STATUS_ACTIVE: "active",
-    STATUS_PAUSED: "paused", STATUS_COMPLETED: "completed", STATUS_ARCHIVED: "archived",
-}
+# Phase 8: competition status label now comes from ui/status_style.py (the
+# one place this project keeps it) instead of a second copy that used to
+# live here AND in live_monitor_view.py.
+COMP_STATUS_KEY = status_style.COMPETITION_STATUS_LABEL_KEY
 MATCH_STATUS_KEY = {
     M_PENDING: "pending", M_READY: "ready", M_RUNNING: "running",
     M_COMPLETED: "completed", M_CANCELLED: "cancelled", M_ERROR: "error_status",
@@ -94,11 +94,7 @@ class CompetitionView(ctk.CTkFrame):
         self.error_lbl.configure(text=t(key) if key else code)
 
     def _status_color(self, status):
-        return {
-            STATUS_DRAFT: self.tokens.text_faint, STATUS_READY: self.tokens.warning,
-            STATUS_ACTIVE: self.tokens.success, STATUS_PAUSED: self.tokens.warning,
-            STATUS_COMPLETED: self.tokens.accent_glow, STATUS_ARCHIVED: self.tokens.text_faint,
-        }[status]
+        return getattr(self.tokens, status_style.COMPETITION_STATUS_COLOR_ATTR[status])
 
     def _match_status_color(self, status):
         return {

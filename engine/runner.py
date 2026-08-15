@@ -119,6 +119,20 @@ class BattleRunner:
         with self._lock:
             self.engine.difficulty = level
 
+    def worker_health(self) -> dict:
+        """Phase 8 (BACKLOG #17): True per side means that side's isolated
+        worker is currently dead (failed to start, crashed, or already
+        timed out). Called immediately after set_team_code()/reset_battle()
+        so a worker that failed to even START becomes a clear, immediate
+        ERROR the caller can act on — instead of silently going RUNNING
+        and only surfacing the failure once the engine ticks and reports
+        the existing per-tick "unavailable" CODE_ERROR. No-op empty dict
+        when isolate_execution is False (there are no workers to ask)."""
+        with self._lock:
+            if not self.engine.isolate_execution:
+                return {}
+            return {side: (w.dead if w is not None else True) for side, w in self.engine._workers.items()}
+
     # ---- read-only state for the UI ----
     def _build_snapshot(self, events: list) -> dict:
         e = self.engine

@@ -1,6 +1,6 @@
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t
 
 COLUMNS = ["rank", "team", "score", "wins", "losses", "damage", "status"]
@@ -57,11 +57,11 @@ class Scoreboard(ctk.CTkFrame):
             # (success/green) or DESTROYED (danger/red) styling (spec
             # sections 9/21/24; closes backlog item 6 in the LIVE
             # scoreboard specifically, not just the historical one).
-            if row["status_key"] == "active":
-                colors[-1] = self.tokens.success
-            elif row["status_key"] in ("damaged", "draw"):
-                colors[-1] = self.tokens.warning
-            else:
-                colors[-1] = self.tokens.danger
+            # Phase 8: the color itself now comes from the single shared
+            # ui/status_style.py table instead of a copy of this same
+            # active/damaged/draw/destroyed mapping.
+            colors[-1] = getattr(
+                self.tokens, status_style.SHIP_STATUS_COLOR_ATTR.get(row["status_key"], "danger"),
+            )
             for w, v, c in zip(widgets, values, colors):
                 w.configure(text=v, text_color=c)

@@ -20,7 +20,7 @@ import time
 
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t, is_rtl
 
 from engine import events as ev
@@ -31,19 +31,15 @@ from tournament.match import (
     STATUS_COMPLETED as M_COMPLETED, STATUS_CANCELLED as M_CANCELLED, STATUS_ERROR as M_ERROR,
 )
 
-COMP_STATUS_KEY = {
-    STATUS_DRAFT: "draft", STATUS_READY: "ready", STATUS_ACTIVE: "active",
-    STATUS_PAUSED: "paused", STATUS_COMPLETED: "completed", STATUS_ARCHIVED: "archived",
-}
+# Phase 8: competition/runtime-state label+color now come from
+# ui/status_style.py (the one place this project keeps them) instead of a
+# second copy that used to live here AND in topbar.py/competition_view.py.
+COMP_STATUS_KEY = status_style.COMPETITION_STATUS_LABEL_KEY
 MATCH_STATUS_KEY = {
     M_PENDING: "pending", M_READY: "ready", M_RUNNING: "running",
     M_COMPLETED: "completed", M_CANCELLED: "cancelled", M_ERROR: "error_status",
 }
-RUNTIME_STATE_KEY = {
-    live_state.IDLE: "idle", live_state.PREPARING: "preparing", live_state.RUNNING: "live",
-    live_state.PAUSED: "paused", live_state.COMPLETED: "completed", live_state.ERROR: "error_status",
-    live_state.STOPPED: "stopped",
-}
+RUNTIME_STATE_KEY = status_style.RUNTIME_STATE_LABEL_KEY
 TEAM_CODE_STATUS_KEY = {
     live_state.READY: "ready", live_state.CODE_RUNNING: "running",
     live_state.CODE_ERROR: "error_status", live_state.CODE_TIMEOUT_STATUS: "timeout_status",
@@ -182,11 +178,7 @@ class LiveMonitorView(ctk.CTkFrame):
         self._build_match_queue(panel, rounds, matches)
 
     def _comp_status_color(self, status):
-        return {
-            STATUS_DRAFT: self.tokens.text_faint, STATUS_READY: self.tokens.warning,
-            STATUS_ACTIVE: self.tokens.success, STATUS_PAUSED: self.tokens.warning,
-            STATUS_COMPLETED: self.tokens.accent_glow, STATUS_ARCHIVED: self.tokens.text_faint,
-        }[status]
+        return getattr(self.tokens, status_style.COMPETITION_STATUS_COLOR_ATTR[status])
 
     def _on_competition_change(self, name):
         self.selected_competition_id = self._comp_name_to_id.get(name)
@@ -402,12 +394,7 @@ class LiveMonitorView(ctk.CTkFrame):
             return
 
         label_key = RUNTIME_STATE_KEY.get(runtime_state, "idle")
-        color = {
-            live_state.IDLE: self.tokens.text_faint, live_state.PREPARING: self.tokens.warning,
-            live_state.RUNNING: self.tokens.danger, live_state.PAUSED: self.tokens.text_faint,
-            live_state.COMPLETED: self.tokens.accent_glow, live_state.ERROR: self.tokens.danger,
-            live_state.STOPPED: self.tokens.text_faint,
-        }.get(runtime_state, self.tokens.text_faint)
+        color = getattr(self.tokens, status_style.RUNTIME_STATE_COLOR_ATTR.get(runtime_state, "text_faint"))
         self.runtime_pill.configure(text=t(label_key), fg_color=color)
         self.ack_error_btn.configure(state="normal" if can_acknowledge_error else "disabled")
 
@@ -415,7 +402,13 @@ class LiveMonitorView(ctk.CTkFrame):
         self.resume_btn.configure(state="normal" if runtime_state == live_state.PAUSED else "disabled")
         self.stop_btn.configure(state="normal" if active_match_id is not None else "disabled")
 
-        if match_context:
+        if runtime_state == live_state.PREPARING:
+            # Phase 8 (BACKLOG #17): make the bounded worker-spawn pause an
+            # explicit, visible message instead of a silent freeze — this
+            # is real text shown for the real window App._on_start_match()
+            # holds `_match_preparing`, not a cosmetic-only label.
+            self.context_lbl.configure(text=t("preparing_workers_message"))
+        elif match_context:
             ctx = match_context
             self.context_lbl.configure(text=f"{ctx['competition'].name} · {ctx['round'].name} · #{ctx['match'].match_number}")
         else:
@@ -506,6 +499,19 @@ class LiveMonitorView(ctk.CTkFrame):
             message = t(a.key)
             if a.context.get("team"):
                 message = f"{a.context['team']} — {message}"
+            # Phase 8 (BACKLOG #6): surface the actual detail (e.g. the
+            # forbidden API function name, or "exceeded 2.0s") alongside
+            # the generic localized label instead of only the label —
+            # this is exactly the real event.message ForbiddenAPIError/
+            # CODE_TIMEOUT already carry (engine/api.py, engine/battle.py),
+            # never a fabricated string. Strip the internal "error: "
+            # prefix engine/sandbox.py's run_decide() adds — a UI-facing
+            # detail, not a Python traceback.
+            detail = (a.context.get("message") or "").strip()
+            if detail.startswith("error: "):
+                detail = detail[len("error: "):]
+            if detail:
+                message = f"{message}: {detail}"
             self.alerts_box.insert("end", f"[{stamp}] {message}\n", a.severity)
         self.alerts_box.see("end")
         self.alerts_box.configure(state="disabled")

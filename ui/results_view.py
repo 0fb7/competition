@@ -12,7 +12,7 @@ view is purely a read/query surface over already-persisted history.
 
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t, is_rtl
 
 from tournament.match import (
@@ -48,6 +48,7 @@ class ResultsView(ctk.CTkFrame):
         self.hist_competition_id = None  # None == all competitions
         self.hist_team_id = None
         self.hist_result = RESULT_FILTER_ALL
+        self.profile_team_id = None  # Phase 8 (BACKLOG #13): Team Performance tab selection
 
         self._build_shell()
         self.refresh()
@@ -61,8 +62,44 @@ class ResultsView(ctk.CTkFrame):
         self.title_lbl = ctk.CTkLabel(head, text=t("results_title"), font=theme.font(16, "bold"), text_color=self.tokens.text)
         self.title_lbl.pack(side="left")
 
+        tabs = ctk.CTkFrame(head, fg_color=self.tokens.panel_2, corner_radius=999)
+        tabs.pack(side="right")
+        self.dashboard_tab_btn = ctk.CTkButton(
+            tabs, text=t("results_title"), width=110, height=26, corner_radius=999, font=theme.font(10, "bold"),
+            command=self._show_dashboard_tab,
+        )
+        self.dashboard_tab_btn.pack(side="left", padx=2, pady=2)
+        self.profile_tab_btn = ctk.CTkButton(
+            tabs, text=t("team_performance_title"), width=140, height=26, corner_radius=999, font=theme.font(10, "bold"),
+            command=self._show_profile_tab,
+        )
+        self.profile_tab_btn.pack(side="left", padx=2, pady=2)
+        self._style_tabs()
+
         self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.body.pack(fill="both", expand=True)
+
+    def _style_tabs(self):
+        active_mode = "team_profile" if self.mode == "team_profile" else "dashboard"
+        self.dashboard_tab_btn.configure(
+            fg_color=self.tokens.accent if active_mode == "dashboard" else "transparent",
+            text_color=self.tokens.white if active_mode == "dashboard" else self.tokens.text_faint,
+        )
+        self.profile_tab_btn.configure(
+            fg_color=self.tokens.accent if active_mode == "team_profile" else "transparent",
+            text_color=self.tokens.white if active_mode == "team_profile" else self.tokens.text_faint,
+        )
+
+    def _show_dashboard_tab(self):
+        self.mode = "dashboard"
+        self.selected_match_id = None
+        self._style_tabs()
+        self.refresh()
+
+    def _show_profile_tab(self):
+        self.mode = "team_profile"
+        self._style_tabs()
+        self.refresh()
 
     def apply_language(self):
         self._build_shell()
@@ -101,6 +138,8 @@ class ResultsView(ctk.CTkFrame):
                 self.refresh()
                 return
             self._build_match_detail(result)
+        elif self.mode == "team_profile":
+            self._build_team_profile()
         else:
             self._build_dashboard()
 
@@ -342,6 +381,112 @@ class ResultsView(ctk.CTkFrame):
             fg_color=self.tokens.panel, hover_color=self.tokens.border,
             command=lambda mid=result.match_id: self._show_match_detail(mid),
         ).pack(side="right")
+
+    # =========================================================== team performance (Phase 8, BACKLOG #13)
+    def _build_team_profile(self):
+        """All-time, cross-competition profile for one team. Reuses
+        ResultService.team_performance() verbatim — no second scoring
+        system — plus live TeamService data for current identity (name,
+        members, ship). Historical MatchResults are immutable snapshots
+        (spec section 5, unchanged by Phase 8): a rename only changes what
+        this profile's "current identity" card shows going forward, never
+        the team_x_name_at_match values already baked into past results,
+        which is exactly why match_history() rows below keep showing the
+        name as it was AT THE TIME of that match."""
+        teams = self.team_service.get_all_teams()
+        panel = ctk.CTkFrame(self.body, fg_color=self.tokens.panel, corner_radius=10)
+        panel.pack(fill="x", pady=4, padx=2)
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=10)
+        ctk.CTkLabel(row, text=t("team_performance_title"), font=theme.font(12, "bold"), text_color=self.tokens.text).pack(side="left")
+
+        self._profile_team_name_to_id = {team.name: team.id for team in teams}
+        values = list(self._profile_team_name_to_id) or ["-"]
+        if self.profile_team_id is None and teams:
+            self.profile_team_id = teams[0].id
+        current_name = next((n for n, i in self._profile_team_name_to_id.items() if i == self.profile_team_id), values[0])
+        self.profile_menu = ctk.CTkOptionMenu(
+            row, values=values, fg_color=self.tokens.panel_2, button_color=self.tokens.accent,
+            command=self._on_profile_team_change,
+        )
+        self.profile_menu.set(current_name)
+        self.profile_menu.pack(side="right")
+
+        if not teams:
+            ctk.CTkLabel(panel, text=t("no_teams_title"), font=theme.font(11), text_color=self.tokens.text_faint).pack(anchor="w", padx=14, pady=(0, 12))
+            return
+
+        team = self.team_service.get_team(self.profile_team_id)
+        if team is None:
+            return
+
+        self._build_team_identity_card(team)
+        perf = self.result_service.team_performance(self.profile_team_id)
+        self._build_team_stats_grid(perf)
+
+        recent_panel = ctk.CTkFrame(self.body, fg_color=self.tokens.panel, corner_radius=10)
+        recent_panel.pack(fill="x", pady=4, padx=2)
+        ctk.CTkLabel(recent_panel, text=t("recent_matches"), font=theme.font(12, "bold"), text_color=self.tokens.text).pack(anchor="w", padx=16, pady=(12, 6))
+        recent = self.result_service.match_history(team_id=self.profile_team_id)[:10]
+        if not recent:
+            ctk.CTkLabel(recent_panel, text=t("no_results_title"), font=theme.font(10), text_color=self.tokens.text_faint).pack(anchor="w", padx=16, pady=(0, 14))
+        else:
+            for result in recent:
+                self._build_match_row(recent_panel, result)
+            ctk.CTkFrame(recent_panel, fg_color="transparent", height=6).pack()
+
+    def _on_profile_team_change(self, name):
+        self.profile_team_id = self._profile_team_name_to_id.get(name)
+        self.refresh()
+
+    def _build_team_identity_card(self, team):
+        status = self.team_service.compute_status(team)
+
+        panel = ctk.CTkFrame(self.body, fg_color=self.tokens.panel, corner_radius=10)
+        panel.pack(fill="x", pady=4, padx=2)
+        head = ctk.CTkFrame(panel, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ctk.CTkLabel(head, text=team.name, font=theme.font(15, "bold"), text_color=self.tokens.text).pack(side="left")
+        ctk.CTkLabel(
+            head, text=t(status_style.TEAM_STATUS_LABEL_KEY.get(status, "not_ready")), font=theme.font(9, "bold"),
+            fg_color=getattr(self.tokens, status_style.TEAM_STATUS_COLOR_ATTR.get(status, "text_faint")),
+            text_color="#0B1017", corner_radius=999, padx=10, height=22,
+        ).pack(side="right")
+
+        members_text = ", ".join(m.name for m in team.members) if team.members else t("no_members_yet")
+        ship_text = team.ship_id.upper() if team.ship_id else "-"
+        lines = [
+            f"{t('team_id_label')}: {team.id}",
+            f"{t('members')}: {members_text}",
+            f"{t('assigned_ship')}: {ship_text}",
+        ]
+        for line in lines:
+            ctk.CTkLabel(panel, text=line, font=theme.font(10), text_color=self.tokens.text_faint, anchor="w").pack(fill="x", padx=16, pady=1)
+        ctk.CTkFrame(panel, fg_color="transparent", height=8).pack()
+
+    def _build_team_stats_grid(self, perf):
+        panel = ctk.CTkFrame(self.body, fg_color=self.tokens.panel, corner_radius=10)
+        panel.pack(fill="x", pady=4, padx=2)
+        ctk.CTkLabel(panel, text=t("performance_stats"), font=theme.font(12, "bold"), text_color=self.tokens.text).pack(anchor="w", padx=16, pady=(12, 6))
+
+        grid = ctk.CTkFrame(panel, fg_color="transparent")
+        grid.pack(fill="x", padx=16, pady=(0, 14))
+        stats = [
+            ("total_competitions", str(perf["competitions"])), ("matches_played", str(perf["played"])),
+            ("wins", str(perf["wins"])), ("losses", str(perf["losses"])), ("draw", str(perf["draws"])),
+            ("errors_count", str(perf["errors"])), ("win_rate", f"{perf['win_rate'] * 100:.0f}%"),
+            ("damage_dealt", f"{perf['damage_dealt']:.0f}"), ("damage_received", f"{perf['damage_received']:.0f}"),
+            ("score", str(perf["score"])),
+            ("avg_match_duration", f"{perf['avg_duration']:.1f}s" if perf["avg_duration"] else "-"),
+        ]
+        for i, (key, value) in enumerate(stats):
+            col = i % 4
+            r = i // 4
+            grid.columnconfigure(col, weight=1)
+            cell = ctk.CTkFrame(grid, fg_color=self.tokens.panel_2, corner_radius=8)
+            cell.grid(row=r, column=col, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(cell, text=t(key), font=theme.font(9), text_color=self.tokens.text_faint).pack(anchor="w", padx=10, pady=(8, 0))
+            ctk.CTkLabel(cell, text=value, font=theme.font(13, "bold"), text_color=self.tokens.text).pack(anchor="w", padx=10, pady=(0, 8))
 
     # =========================================================== detail
     def _show_match_detail(self, match_id):

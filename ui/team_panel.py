@@ -1,13 +1,15 @@
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t
 
-# Roster flavor metadata — not battle telemetry. HP/energy/status below
-# always come from the live engine snapshot.
-ROSTER = {
-    "alpha": {"player": "Ahmed", "color_key": "accent_glow"},
-    "beta": {"player": "Mohammed", "color_key": "orange"},
+# Phase 8 (BACKLOG #3): only cosmetic per-slot accent styling lives here now
+# — the "Ahmed"/"Mohammed" placeholder names this used to hardcode are gone;
+# the "player"/members row is now populated from the real managed Team
+# (roster/team_service.py's team_for_slot()) passed into update_from().
+SLOT_STYLE = {
+    "alpha": {"color_key": "accent_glow"},
+    "beta": {"color_key": "orange"},
 }
 
 
@@ -21,7 +23,7 @@ class TeamCard(ctk.CTkFrame):
     def _build(self):
         for w in self.winfo_children():
             w.destroy()
-        accent = getattr(self.tokens, ROSTER[self.side_key]["color_key"])
+        accent = getattr(self.tokens, SLOT_STYLE[self.side_key]["color_key"])
 
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=12, pady=(10, 4))
@@ -57,22 +59,25 @@ class TeamCard(ctk.CTkFrame):
         prev_values = {k: v[1].cget("text") for k, v in self.rows.items()}
         self._build()
 
-    def update_from(self, ship: dict, score: int, is_draw: bool = False):
+    def update_from(self, ship: dict, score: int, is_draw: bool = False, team=None):
         self.name_lbl.configure(text=ship["team"].upper())
-        alive = ship["alive"]
-        if is_draw:
-            # DRAW is a distinct, first-class status — never rendered as
-            # ACTIVE/DAMAGED/DESTROYED (spec sections 9/21/24).
-            status_key, color = "draw", self.tokens.warning
-        else:
-            status_key = "active" if alive else "destroyed"
-            color = self.tokens.success if alive else self.tokens.danger
-            if alive and ship["hp_pct"] < 0.5:
-                status_key, color = "damaged", self.tokens.warning
+        # DRAW is a distinct, first-class status — never rendered as
+        # ACTIVE/DAMAGED/DESTROYED (spec sections 9/21/24). Phase 8: this
+        # derivation is now the one status_style.ship_battle_status()
+        # shared with ui/app.py's scoreboard-row status instead of a
+        # second, independently-maintained copy.
+        status_key = status_style.ship_battle_status(ship, is_draw)
+        color = getattr(self.tokens, status_style.SHIP_STATUS_COLOR_ATTR[status_key])
         self.status_pill.configure(text=t(status_key), fg_color=color)
 
+        if team is not None and team.members:
+            player_text = ", ".join(m.name for m in team.members)
+        elif team is not None:
+            player_text = t("no_members_yet")
+        else:
+            player_text = "-"
         values = {
-            "player": ROSTER[self.side_key]["player"],
+            "player": player_text,
             "ship": ship["name"],
             "score": str(score),
             "action": ship.get("last_action", "-"),
@@ -114,6 +119,8 @@ class TeamPanel(ctk.CTkFrame):
         self.card_a.apply_language()
         self.card_b.apply_language()
 
-    def update_from_snapshot(self, snapshot: dict, score_a: int, score_b: int, is_draw: bool = False):
-        self.card_a.update_from(snapshot["ship_a"], score_a, is_draw)
-        self.card_b.update_from(snapshot["ship_b"], score_b, is_draw)
+    def update_from_snapshot(
+        self, snapshot: dict, score_a: int, score_b: int, is_draw: bool = False, team_a=None, team_b=None,
+    ):
+        self.card_a.update_from(snapshot["ship_a"], score_a, is_draw, team=team_a)
+        self.card_b.update_from(snapshot["ship_b"], score_b, is_draw, team=team_b)

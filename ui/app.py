@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import customtkinter as ctk
 
+from storage import CorruptedDataError
+
 from engine.battle import BattleEngine
 from engine.competition import CompetitionTracker
 from engine.runner import BattleRunner
@@ -55,7 +57,7 @@ from .challenges_view import ChallengesView
 from .submission_workspace import SubmissionWorkspace
 from .competition_view import CompetitionView
 from .results_view import ResultsView
-from . import live_state
+from . import live_state, status_style
 from .live_monitor_view import LiveMonitorView
 
 LIVE_EVENT_BUFFER = 200   # spec section 27: bounded live UI buffer; full history stays in results/
@@ -144,6 +146,8 @@ class App(ctk.CTk):
         self.runtime_state = live_state.IDLE
         self._last_tick_perf = None
         self.ui_update_hz = 0.0
+        self._match_preparing = False  # Phase 8 (BACKLOG #17): True only for the real span
+        # _on_start_match() holds while spawning that match's isolated workers
 
         alpha_team = self.team_service.team_for_slot("alpha")
         beta_team = self.team_service.team_for_slot("beta")
@@ -395,9 +399,18 @@ class App(ctk.CTk):
         _sync_engine_state()'s role for regular battles. Section 31: the
         SAME BattleRunner the standalone Battle Arena already shows is
         used here, so the arena genuinely reflects the running Match
-        rather than a separate/fake view."""
-        if self.active_match_id is not None:
-            return  # a match is already running; do not stomp it
+        rather than a separate/fake view.
+
+        Phase 8 (BACKLOG #17): set_team_code() below spawns a fresh OS
+        process per side (~100-200ms each, measured in Phase 7) on THIS
+        thread — not fixed here (that would risk the exact regression the
+        Phase 7 lock-free/locked split was built to prevent), but now made
+        an honest, visible PREPARING state instead of a silent freeze:
+        `_match_preparing` flips True and a paint is forced BEFORE the
+        blocking calls, and flips back False (success or failure) before
+        this method returns."""
+        if self.active_match_id is not None or self._match_preparing:
+            return  # a match is already running or already being prepared; do not stomp it
         snap = self._last_snapshot
         battle_ongoing = snap and (snap["running"] or (snap["tick_count"] > 0 and not snap["ended"]))
         if battle_ongoing:
@@ -411,10 +424,56 @@ class App(ctk.CTk):
             self._push_alert(live_state.Alert(live_state.SEVERITY_WARNING, "alert_match_cannot_start", {}, time.time()))
             return
 
+        # prepare_match_for_start() already flipped the Match to RUNNING —
+        # set the preparing flag and active_match_id immediately so no
+        # second Start click (or a second queued invocation) can slip in
+        # while the workers below are spawning.
+        self._match_preparing = True
+        self.active_match_id = match_id
+        self.runtime_state = live_state.PREPARING
+        # _last_snapshot can still be None this early (the very first
+        # _tick() call is scheduled 66ms after App.__init__, so a match
+        # started before that single tick has ever run would otherwise
+        # crash topbar.update_status()/live_monitor's update_from_tick()
+        # on an unconditional snapshot["..."] lookup) — skip this
+        # immediate paint in that narrow window; the real _tick() a
+        # moment later still correctly computes PREPARING once a
+        # snapshot exists (self.runtime_state is already set above).
+        if self._last_snapshot is not None:
+            self.topbar.update_status(self._last_snapshot, live_state.PREPARING)
+            if hasattr(self, "live_monitor_view"):
+                self.live_monitor_view.update_from_tick(
+                    snap=self._last_snapshot, runtime_state=live_state.PREPARING, active_match_id=self.active_match_id,
+                    match_context=None, team_code_status=self.team_code_status, last_target=self.last_target,
+                    live_events=self.live_events, alerts=self.alerts, runtime_log=self.runtime_log,
+                    ui_update_hz=self.ui_update_hz, embedded_fps=None, engine_faults=self._engine_faults,
+                    can_acknowledge_error=False,
+                )
+        self.update_idletasks()  # force the PREPARING paint before the blocking work below
+
         self.runner.set_team_code("alpha", code_a)
         self.runner.set_team_code("beta", code_b)
         self.runner.reset_battle(team_a_name=name_a, team_b_name=name_b, config=config)
-        self.active_match_id = match_id
+
+        health = self.runner.worker_health()
+        if health.get("alpha") or health.get("beta"):
+            # A worker failed to even start — a clear, immediate ERROR,
+            # never a match that silently goes RUNNING with a dead side.
+            self._match_preparing = False
+            self.active_match_id = None
+            try:
+                self.tournament_service.error_match(match_id, "worker_start_failed")
+            except TournamentValidationError:
+                pass
+            self._push_alert(live_state.Alert(live_state.SEVERITY_ERROR, "alert_worker_start_failed", {}, time.time()))
+            self._log_runtime("match_worker_start_failed", match_id=match_id)
+            messagebox.showerror(t("start_match"), t("worker_start_failed"))
+            if hasattr(self, "competitions_view"):
+                self.competitions_view.refresh()
+            if hasattr(self, "live_monitor_view"):
+                self.live_monitor_view.refresh()
+            return
+
         self.match_events = []  # fresh per-match event buffer — see _tick()
         self._reset_engine_cycle_flags()
         match = self.tournament_service.get_match(match_id)
@@ -423,12 +482,9 @@ class App(ctk.CTk):
             "round": self.tournament_service.get_round(match.round_id),
             "match": match,
         }
-        # Between reset_battle() (config/ships loaded, tick_count == 0,
-        # running == False) and start_battle() below, the runtime state
-        # genuinely computes to PREPARING (live_state.compute_runtime_state)
-        # — a real, reachable state, not a fabricated one (spec section 3).
         self._log_runtime("match_start", match_id=match_id)
         self.runner.start_battle()
+        self._match_preparing = False
         if hasattr(self, "competitions_view"):
             self.competitions_view.refresh()
         if hasattr(self, "live_monitor_view"):
@@ -740,7 +796,7 @@ class App(ctk.CTk):
             self.dashboard_left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
             self.dashboard_right.grid(row=0, column=1, sticky="nsew")
         else:
-            self.placeholder.configure(text=f"{t(f'nav_{key}')}\n\n(not built yet in this milestone)")
+            self.placeholder.configure(text=f"{t(f'nav_{key}')}\n\n{t('not_built_yet')}")
             self.placeholder.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
     def _set_language(self, lang: str):
@@ -800,6 +856,7 @@ class App(ctk.CTk):
 
         self.runtime_state = live_state.compute_runtime_state(
             snap, self.active_match_id, self.admin_stopped, self.engine_fault,
+            preparing=self._match_preparing,
         )
         is_draw = live_state.is_draw_outcome(snap)
 
@@ -809,18 +866,15 @@ class App(ctk.CTk):
         score_map = {r.team: r.score for r in ranked}
         self.team_panel.update_from_snapshot(
             snap, score_map.get(snap["ship_a"]["team"], 0), score_map.get(snap["ship_b"]["team"], 0), is_draw,
+            team_a=self.team_service.team_for_slot("alpha"), team_b=self.team_service.team_for_slot("beta"),
         )
 
         ship_by_team = {snap["ship_a"]["team"]: snap["ship_a"], snap["ship_b"]["team"]: snap["ship_b"]}
         rows = []
         for i, rec in enumerate(ranked, start=1):
             ship = ship_by_team.get(rec.team)
-            if is_draw and ship is not None:
-                status_key = "draw"
-            elif ship is not None:
-                status_key = "active" if ship["alive"] else "destroyed"
-                if ship["alive"] and ship["hp_pct"] < 0.5:
-                    status_key = "damaged"
+            if ship is not None:
+                status_key = status_style.ship_battle_status(ship, is_draw)
             else:
                 status_key = "active"  # a managed team not currently loaded into either slot
             rows.append({
@@ -892,7 +946,27 @@ class App(ctk.CTk):
 
 
 def main():
-    app = App()
+    # Phase 8 (Step 10): a corrupted data/*.json file used to propagate
+    # CorruptedDataError all the way out of App.__init__() as a raw,
+    # unhandled traceback — the exact "no normal user action should
+    # result in a raw traceback window" case the spec calls out. This is
+    # the one place that can happen (every repository is constructed
+    # inside App.__init__()), so it's the one place that needs to catch
+    # it and show a clear, bilingual, actionable message instead. No data
+    # is touched/repaired here — same "never silently overwrite" rule
+    # storage.py itself documents.
+    try:
+        app = App()
+    except CorruptedDataError as e:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            t("startup_corrupted_data_title"),
+            t("startup_corrupted_data_body").format(detail=str(e)),
+        )
+        root.destroy()
+        sys.exit(1)
     app.mainloop()
 
 

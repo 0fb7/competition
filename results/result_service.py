@@ -32,7 +32,7 @@ from typing import Optional
 
 from engine.competition import TeamRecord
 
-from tournament.match import OUTCOME_DRAW, OUTCOME_TEAM_A_WIN, OUTCOME_TEAM_B_WIN
+from tournament.match import OUTCOME_DRAW, OUTCOME_ERROR, OUTCOME_TEAM_A_WIN, OUTCOME_TEAM_B_WIN
 from tournament.round import STATUS_COMPLETED as R_COMPLETED, TYPE_ROUND_ROBIN, TYPE_SINGLE_ELIMINATION
 
 from .match_result import DuplicateResultError, MatchEvent, MatchResult
@@ -196,10 +196,8 @@ class ResultService:
             self.repo.get_competition_results(competition_id) if competition_id
             else self.repo.get_all_match_results()
         )
-        results = [
-            r for r in all_results
-            if r.outcome in REAL_OUTCOMES and team_id in (r.team_a_id, r.team_b_id)
-        ]
+        team_all_results = [r for r in all_results if team_id in (r.team_a_id, r.team_b_id)]
+        results = [r for r in team_all_results if r.outcome in REAL_OUTCOMES]
         wins = losses = draws = 0
         damage_dealt = damage_received = 0.0
         durations = []
@@ -218,12 +216,30 @@ class ResultService:
             else:
                 losses += 1
         played = len(results)
+        # Phase 8 (BACKLOG #13): additive fields only — win/loss/draw/
+        # win_rate/played above are completely unchanged from Phase 5.
+        # `errors` counts matches with a real OUTCOME_ERROR involving this
+        # team WITHOUT folding them into win_rate (Phase 5's deliberate
+        # "ERROR is not a battle result" rule, see this module's docstring)
+        # — shown for visibility only. `score` reuses TeamRecord.score
+        # verbatim (same formula leaderboard() already uses), never a
+        # second scoring system. `name` also falls back to the most recent
+        # ERROR-result name if the team never had a REAL_OUTCOMES result
+        # (e.g. every match so far errored) so the profile still shows a
+        # real display name instead of the raw team_id.
+        errors = sum(1 for r in team_all_results if r.outcome == OUTCOME_ERROR)
+        if team_all_results and name == team_id:
+            last = team_all_results[-1]
+            name = last.team_a_name_at_match if last.team_a_id == team_id else (last.team_b_name_at_match or name)
+        competitions = len({r.competition_id for r in team_all_results})
+        score = TeamRecord(team=name, wins=wins, losses=losses, damage_dealt=damage_dealt, damage_received=damage_received).score
         return {
             "team_id": team_id, "team_name": name, "played": played,
-            "wins": wins, "losses": losses, "draws": draws,
+            "wins": wins, "losses": losses, "draws": draws, "errors": errors,
             "win_rate": (wins / played) if played else 0.0,
             "damage_dealt": damage_dealt, "damage_received": damage_received,
             "avg_duration": (sum(durations) / len(durations)) if durations else None,
+            "competitions": competitions, "score": score,
         }
 
     def competition_summary(self, competition_id: str) -> Optional[dict]:

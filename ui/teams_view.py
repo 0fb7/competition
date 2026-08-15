@@ -15,16 +15,14 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from . import theme
+from . import theme, status_style
 from .localization import t, is_rtl
 from roster.team import ValidationError, SHIP_SLOTS, STATUS_READY, STATUS_IN_BATTLE, STATUS_DISABLED, STATUS_NOT_READY
 
-STATUS_LABEL_KEY = {
-    STATUS_READY: "ready",
-    STATUS_IN_BATTLE: "in_battle",
-    STATUS_DISABLED: "disabled_status",
-    STATUS_NOT_READY: "not_ready",
-}
+# Phase 8: team status label/color now come from ui/status_style.py (the
+# one place this project keeps them) instead of two near-identical copies
+# that used to live here (list card + detail card).
+STATUS_LABEL_KEY = status_style.TEAM_STATUS_LABEL_KEY
 
 ERROR_KEY = {
     "empty_name": "error_empty_name",
@@ -46,8 +44,32 @@ class TeamsView(ctk.CTkFrame):
         self.on_changed = on_changed or (lambda: None)
         self.mode = "list"                  # "list" | "create" | "detail"
         self.selected_id = None
+        # Phase 8 (BACKLOG #5 completion): team ids with a ship reassignment
+        # saved while genuinely IN_BATTLE — see _save_detail(). Cleared once
+        # that team is no longer IN_BATTLE (the battle ended/was reset, so
+        # App._sync_engine_state() has since had the chance to pick the
+        # change up — spec: "Pending for next battle" must disappear once
+        # it actually IS the next battle, not linger forever).
+        self._pending_reassignment_ids = set()
         self._build_shell()
         self.refresh()
+
+    def _prune_resolved_pending(self):
+        if not self._pending_reassignment_ids:
+            return
+        # Deliberately NOT compute_status(team) == STATUS_IN_BATTLE here:
+        # compute_status also requires team.ship_id to still be truthy, but
+        # an admin may have UNASSIGNED the ship mid-battle (ship_id -> None)
+        # while the live engine — untouched until Reset — still has that
+        # team's code actually running under its old identity. is_team_active()
+        # alone (the same predicate compute_status uses internally) checks
+        # by team NAME against the live snapshot, independent of the
+        # current ship_id value, so the badge correctly survives until the
+        # battle this change was pending against actually ends/resets.
+        self._pending_reassignment_ids = {
+            team_id for team_id in self._pending_reassignment_ids
+            if self.service.get_team(team_id) is not None and self.service.is_team_active(team_id)
+        }
 
     # ------------------------------------------------------------- shell
     def _build_shell(self):
@@ -85,6 +107,7 @@ class TeamsView(ctk.CTkFrame):
     def refresh(self):
         for w in self.body.winfo_children():
             w.destroy()
+        self._prune_resolved_pending()
 
         if self.mode == "create":
             self._build_create_form()
@@ -137,14 +160,16 @@ class TeamsView(ctk.CTkFrame):
 
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
-        color = {
-            STATUS_READY: self.tokens.success, STATUS_IN_BATTLE: self.tokens.accent_glow,
-            STATUS_DISABLED: self.tokens.text_faint, STATUS_NOT_READY: self.tokens.warning,
-        }[status]
+        color = getattr(self.tokens, status_style.TEAM_STATUS_COLOR_ATTR[status])
         ctk.CTkLabel(
             right, text=t(STATUS_LABEL_KEY[status]), font=theme.font(9, "bold"), fg_color=color,
             text_color="#0B1017", corner_radius=999, width=90, height=20,
         ).pack(side="right", padx=(8, 0))
+        if team.id in self._pending_reassignment_ids:
+            ctk.CTkLabel(
+                right, text=t("pending_next_battle"), font=theme.font(9, "bold"), fg_color=self.tokens.warning,
+                text_color="#0B1017", corner_radius=999, height=20,
+            ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             right, text=t("details"), width=76, fg_color=self.tokens.panel_2,
             hover_color=self.tokens.border, command=lambda tid=team.id: self._show_detail(tid),
@@ -229,14 +254,16 @@ class TeamsView(ctk.CTkFrame):
         head = ctk.CTkFrame(panel, fg_color="transparent")
         head.pack(fill="x", padx=16, pady=(14, 6))
         ctk.CTkLabel(head, text=team.name, font=theme.font(15, "bold"), text_color=self.tokens.text).pack(side="left")
-        color = {
-            STATUS_READY: self.tokens.success, STATUS_IN_BATTLE: self.tokens.accent_glow,
-            STATUS_DISABLED: self.tokens.text_faint, STATUS_NOT_READY: self.tokens.warning,
-        }[status]
+        color = getattr(self.tokens, status_style.TEAM_STATUS_COLOR_ATTR[status])
         ctk.CTkLabel(
             head, text=t(STATUS_LABEL_KEY[status]), font=theme.font(9, "bold"), fg_color=color,
             text_color="#0B1017", corner_radius=999, width=90, height=20,
         ).pack(side="right")
+        if team.id in self._pending_reassignment_ids:
+            ctk.CTkLabel(
+                head, text=t("pending_next_battle"), font=theme.font(9, "bold"), fg_color=self.tokens.warning,
+                text_color="#0B1017", corner_radius=999, height=20,
+            ).pack(side="right", padx=(0, 8))
 
         # ---- editable fields ----
         ctk.CTkLabel(panel, text=t("team_name"), font=theme.font(10), text_color=self.tokens.text_faint).pack(anchor="w", padx=16)
@@ -331,6 +358,7 @@ class TeamsView(ctk.CTkFrame):
             return
 
         if was_in_battle:
+            self._pending_reassignment_ids.add(team_id)
             messagebox.showinfo(t("assign_ship"), t("ship_change_pending_reset"))
 
         self.refresh()

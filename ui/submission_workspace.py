@@ -16,6 +16,7 @@ from .localization import t, is_rtl
 from .code_editor import CodeEditor
 from submissions.submission import (
     STATUS_DRAFT, STATUS_VALIDATED, STATUS_SUBMITTED, STATUS_REJECTED,
+    TEST_PASSED, TEST_FAILED, TEST_TIMEOUT, TEST_ERROR,
     ImmutableSubmissionError,
 )
 from submissions.submission_service import ValidationError
@@ -23,6 +24,11 @@ from submissions.submission_service import ValidationError
 STATUS_LABEL_KEY = {
     STATUS_DRAFT: "draft", STATUS_VALIDATED: "validated",
     STATUS_SUBMITTED: "submitted", STATUS_REJECTED: "rejected",
+}
+
+TEST_RESULT_LABEL_KEY = {
+    TEST_PASSED: "test_passed", TEST_FAILED: "test_failed",
+    TEST_TIMEOUT: "test_timeout", TEST_ERROR: "test_error",
 }
 
 
@@ -255,9 +261,12 @@ class SubmissionWorkspace(ctk.CTkFrame):
             tr = submission.test_result
             box = ctk.CTkFrame(parent, fg_color="transparent")
             box.pack(fill="x", padx=14, pady=(6, 10))
-            color = self.tokens.success if tr.passed else self.tokens.danger
+            color = {
+                TEST_PASSED: self.tokens.success, TEST_FAILED: self.tokens.danger,
+                TEST_TIMEOUT: self.tokens.warning, TEST_ERROR: self.tokens.danger,
+            }[tr.status]
             ctk.CTkLabel(
-                box, text=f"{t('test_results')}: " + (t("test_passed") if tr.passed else t("test_failed")),
+                box, text=f"{t('test_results')}: {t(TEST_RESULT_LABEL_KEY[tr.status])}",
                 font=theme.font(11, "bold"), text_color=color,
             ).pack(anchor="w")
             detail = (
@@ -311,6 +320,15 @@ class SubmissionWorkspace(ctk.CTkFrame):
             self.after(150, lambda: self._poll_test(thread, result_box, submission_id))
             return
         self._testing = False
+        # Phase 8 (Step 10): this used to be captured into result_box["error"]
+        # and never read anywhere — a genuine silent failure (the "Testing..."
+        # status would just disappear with no result AND no explanation if
+        # test_submission() ever raised something unexpected). Never a
+        # candidate-code error (those become a TIMEOUT/ERROR TestResult, not
+        # an exception here) — this is a real bug in the test runner itself,
+        # so it's shown, not swallowed.
+        if "error" in result_box:
+            messagebox.showerror(t("test"), t("test_runner_internal_error").format(detail=result_box["error"]))
         if self.selected_submission_id == submission_id:
             self.refresh()
         self.on_changed()
