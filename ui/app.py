@@ -10,6 +10,8 @@ battle state.
 
 import os
 import sys
+import time
+import tkinter.messagebox as messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,6 +36,10 @@ from tournament.tournament_service import TournamentService
 from tournament.competition import ValidationError as TournamentValidationError
 from tournament.match import OUTCOME_TEAM_A_WIN, OUTCOME_TEAM_B_WIN, OUTCOME_DRAW, OUTCOME_ERROR
 
+from results.result_repository import ResultRepository
+from results.result_service import ResultService
+from engine import events as ev
+
 from . import theme, localization
 from .localization import t
 from .topbar import TopBar
@@ -48,6 +54,13 @@ from .teams_view import TeamsView
 from .challenges_view import ChallengesView
 from .submission_workspace import SubmissionWorkspace
 from .competition_view import CompetitionView
+from .results_view import ResultsView
+from . import live_state
+from .live_monitor_view import LiveMonitorView
+
+LIVE_EVENT_BUFFER = 200   # spec section 27: bounded live UI buffer; full history stays in results/
+ALERT_BUFFER = 100
+RUNTIME_LOG_BUFFER = 300
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -94,12 +107,43 @@ class App(ctk.CTk):
         submission_repo = SubmissionRepository(os.path.join(ROOT, "data", "submissions.json"))
         self.submission_service = SubmissionService(submission_repo, self.team_service, self.challenge_service)
 
+        # ---- historical results/leaderboard/analytics (results/) ----
+        # Constructed before TournamentService so it can be injected —
+        # TournamentService needs it to record a BYE's MatchResult the
+        # instant the BYE is created (see tournament_service.py).
+        result_repo = ResultRepository(os.path.join(ROOT, "data", "results"))
+
         # ---- competitions, rounds & matches (tournament/) ----
         tournament_repo = TournamentRepository(os.path.join(ROOT, "data", "tournament"))
+        # TournamentService.result_service is set just below, once
+        # self.result_service exists (they reference each other read-only).
         self.tournament_service = TournamentService(
             tournament_repo, self.team_service, self.challenge_service, self.submission_service,
         )
+        self.result_service = ResultService(
+            result_repo, self.tournament_service, self.team_service,
+            self.challenge_service, self.submission_service,
+        )
+        self.tournament_service.result_service = self.result_service
         self.active_match_id = None  # set while a competition Match owns the live engine
+        self.match_events: list = []  # engine.events.Event objects accumulated for the running competition match
+
+        # ---- Phase 6: live runtime monitoring state, all derived (never
+        # a second source of truth) from BattleRunner.snapshot() inside
+        # the single authoritative drain point, _tick() ----
+        self.admin_stopped = False      # admin pressed Stop this engine cycle (cleared on next prepare/reset)
+        self.engine_fault = False       # engine.step() itself raised — see _on_engine_fault()
+        self._engine_faults: list = []  # bounded (msg, timestamp) pairs, for the Runtime Log's technical detail
+        self._fault_at_tick: int | None = None  # tick_count at the moment of the most recent fault — see _on_acknowledge_error()
+        self.live_events: list = []     # bounded mirror of real events, for the Live Event Stream (spec section 27)
+        self.alerts: list = []          # bounded Alert objects, for the administrator Alert area
+        self.runtime_log: list = []     # bounded technical log entries (engine start/pause/.../match start/...)
+        self.last_team_code_kind = {"alpha": None, "beta": None}   # most recent CODE_EXECUTED/CODE_ERROR per side
+        self.last_target = {"alpha": None, "beta": None}           # most recent TARGET_ACQUIRED per side
+        self.team_code_status = {"alpha": live_state.READY, "beta": live_state.READY}
+        self.runtime_state = live_state.IDLE
+        self._last_tick_perf = None
+        self.ui_update_hz = 0.0
 
         alpha_team = self.team_service.team_for_slot("alpha")
         beta_team = self.team_service.team_for_slot("beta")
@@ -115,10 +159,10 @@ class App(ctk.CTk):
 
         self.engine = BattleEngine(
             team_a_code, team_b_code, team_a_name=team_a_name, team_b_name=team_b_name,
-            config=initial_config,
+            config=initial_config, isolate_execution=True,
         )
         self.runner = BattleRunner(self.engine, tick_hz=30)
-        self.runner.on_error = lambda msg: print(f"[engine error] {msg}")
+        self.runner.on_error = self._on_engine_fault
         self.runner.start_thread()
         if active_challenge:
             self.runner.set_difficulty(self._difficulty_level_number(active_challenge.difficulty))
@@ -174,6 +218,133 @@ class App(ctk.CTk):
     def _difficulty_level_number(level: str) -> int:
         return {"LEVEL_1": 1, "LEVEL_2": 2, "LEVEL_3": 3}.get(level, 2)
 
+    # ------------------------------------------------------ Phase 6: runtime monitoring
+    def _on_engine_fault(self, msg: str):
+        """BattleRunner.on_error — called directly FROM the background
+        engine thread (engine/runner.py's _loop) when engine.step()
+        itself raises. This is a bug in engine code, never a team's
+        decide() (those are caught inside _run_side and turned into
+        CODE_ERROR events; they never reach here) — spec section 7 calls
+        this "serious runtime corruption" that must surface as an
+        administrator-facing ERROR state, not be silently swallowed.
+        Only touches a bool flag and appends to a bounded list — both
+        atomic under CPython's GIL, so no new lock is introduced here;
+        anything needing real cross-field consistency already goes
+        through BattleRunner's own internal lock via snapshot()."""
+        self.engine_fault = True
+        self._fault_at_tick = self.engine.tick_count
+        self._engine_faults.append((msg, time.time()))
+        if len(self._engine_faults) > 50:
+            self._engine_faults = self._engine_faults[-50:]
+        print(f"[engine error] {msg}")
+
+    def can_acknowledge_error(self) -> bool:
+        """Phase 7 section 15: Acknowledge must NOT pretend the engine
+        recovered — it may only clear the visible ERROR latch when the
+        runtime has demonstrably kept working SINCE the fault (the
+        background thread is still alive AND has produced at least one
+        more successful tick than it had at the moment of the fault).
+        If the thread died, or no further tick has happened yet, this
+        returns False and _on_acknowledge_error() is a deliberate no-op —
+        ERROR stays ERROR, exactly as Phase 6 intended, until a real
+        Reset."""
+        if not self.engine_fault or self._last_snapshot is None:
+            return False
+        return (
+            self._last_snapshot["engine_alive"]
+            and self._fault_at_tick is not None
+            and self._last_snapshot["tick_count"] > self._fault_at_tick
+        )
+
+    def _on_acknowledge_error(self):
+        if not self.can_acknowledge_error():
+            return  # not actually healthy yet — refuse silently rather than fake a recovery
+        self.engine_fault = False
+        self._fault_at_tick = None
+        self._log_runtime("engine_error_acknowledged")
+
+    def _push_alert(self, alert: "live_state.Alert"):
+        self.alerts.append(alert)
+        if len(self.alerts) > ALERT_BUFFER:
+            self.alerts = self.alerts[-ALERT_BUFFER:]
+        if hasattr(self, "live_monitor_view"):
+            self.live_monitor_view.notify_alert()
+
+    def _log_runtime(self, key: str, **ctx):
+        self.runtime_log.append({"key": key, "ctx": ctx, "ts": time.time()})
+        if len(self.runtime_log) > RUNTIME_LOG_BUFFER:
+            self.runtime_log = self.runtime_log[-RUNTIME_LOG_BUFFER:]
+
+    def _reset_engine_cycle_flags(self):
+        """Called whenever the live engine is (re)prepared — clears the
+        per-cycle bookkeeping so a PREVIOUS match's error/stop state can't
+        bleed into the NEXT one's runtime-state computation."""
+        self.admin_stopped = False
+        self.last_team_code_kind = {"alpha": None, "beta": None}
+        self.last_target = {"alpha": None, "beta": None}
+
+    # ---- administrative controls (spec section 12) — all thin wrappers
+    # around the existing BattleRunner methods, never a duplicate ----
+    def _on_pause(self):
+        if self.runtime_state != live_state.RUNNING:
+            return
+        self.runner.pause_battle()
+        self._log_runtime("engine_pause")
+
+    def _on_resume(self):
+        if self.runtime_state != live_state.PAUSED:
+            return
+        self.runner.start_battle()  # BattleEngine has one flag; resume == start, same as the existing Resume-by-Start convention
+        self._log_runtime("engine_resume")
+
+    def _confirm_reset(self):
+        """Reset requires confirmation (spec section 13)."""
+        if messagebox.askyesno(t("reset"), t("confirm_reset_match")):
+            self._do_reset()
+
+    def _do_reset(self):
+        if self.active_match_id is not None:
+            self._stop_active_match(reason="reset")
+        self._reset()
+        self.engine_fault = False
+        self._engine_faults = []
+        self._reset_engine_cycle_flags()
+        self._log_runtime("engine_reset")
+        if hasattr(self, "live_monitor_view"):
+            self.live_monitor_view.refresh()
+
+    def _confirm_stop(self):
+        """Stop requires confirmation (spec section 13)."""
+        if self.active_match_id is None:
+            return
+        if messagebox.askyesno(t("stop"), t("confirm_stop_match")):
+            self._stop_active_match(reason="stop")
+
+    def _stop_active_match(self, reason: str = "stop"):
+        """STOP (spec section 12): freezes the engine immediately and, if
+        a competition Match owns it, records the match as ERROR via the
+        existing TournamentService.error_match() — never a fake winner,
+        never a normal (WIN/DRAW) MatchResult. The real, partial
+        telemetry captured up to the abort point (self.match_events /
+        the last snapshot) IS recorded, honestly labeled ERROR, exactly
+        like Phase 5's already-tested error-result path."""
+        self.runner.pause_battle()
+        if self.active_match_id is not None:
+            match_id = self.active_match_id
+            snap = self._last_snapshot
+            try:
+                match = self.tournament_service.error_match(
+                    match_id, "stopped_by_administrator", duration=snap["elapsed"] if snap else None,
+                )
+                if snap is not None:
+                    self._record_match_result(match, snap)
+            except TournamentValidationError:
+                pass
+            self._teardown_active_match()
+        self.admin_stopped = True
+        self._log_runtime("match_stop_for_reset" if reason == "reset" else "match_stop")
+        self._push_alert(live_state.Alert(live_state.SEVERITY_WARNING, "alert_engine_stopped", {}, time.time()))
+
     def _sync_engine_state(self, force: bool = False):
         """The one place Managed Team -> Submission -> Sandbox ->
         BattleEngine AND Challenge -> Rules -> BattleConfig -> BattleEngine
@@ -216,6 +387,7 @@ class App(ctk.CTk):
         self.runner.reset_battle(team_a_name=alpha_name, team_b_name=beta_name, config=config)
         self.competition.ensure_team(alpha_name)
         self.competition.ensure_team(beta_name)
+        self._reset_engine_cycle_flags()
 
     def _on_start_match(self, match_id: str):
         """The one bridge between tournament/tournament_service.py (which
@@ -229,29 +401,38 @@ class App(ctk.CTk):
         snap = self._last_snapshot
         battle_ongoing = snap and (snap["running"] or (snap["tick_count"] > 0 and not snap["ended"]))
         if battle_ongoing:
-            import tkinter.messagebox as messagebox
             messagebox.showwarning(t("start_match"), t("match_not_eligible"))
+            self._push_alert(live_state.Alert(live_state.SEVERITY_WARNING, "alert_match_cannot_start", {}, time.time()))
             return
         try:
             code_a, code_b, config, name_a, name_b = self.tournament_service.prepare_match_for_start(match_id)
         except TournamentValidationError:
-            import tkinter.messagebox as messagebox
             messagebox.showwarning(t("start_match"), t("match_not_eligible"))
+            self._push_alert(live_state.Alert(live_state.SEVERITY_WARNING, "alert_match_cannot_start", {}, time.time()))
             return
 
         self.runner.set_team_code("alpha", code_a)
         self.runner.set_team_code("beta", code_b)
         self.runner.reset_battle(team_a_name=name_a, team_b_name=name_b, config=config)
         self.active_match_id = match_id
+        self.match_events = []  # fresh per-match event buffer — see _tick()
+        self._reset_engine_cycle_flags()
         match = self.tournament_service.get_match(match_id)
         self.match_context = {
             "competition": self.tournament_service.get_competition(match.competition_id),
             "round": self.tournament_service.get_round(match.round_id),
             "match": match,
         }
+        # Between reset_battle() (config/ships loaded, tick_count == 0,
+        # running == False) and start_battle() below, the runtime state
+        # genuinely computes to PREPARING (live_state.compute_runtime_state)
+        # — a real, reachable state, not a fabricated one (spec section 3).
+        self._log_runtime("match_start", match_id=match_id)
         self.runner.start_battle()
         if hasattr(self, "competitions_view"):
             self.competitions_view.refresh()
+        if hasattr(self, "live_monitor_view"):
+            self.live_monitor_view.refresh()
 
     def _finish_active_match(self, snap: dict):
         """Called from _tick() once the engine reports the battle ended
@@ -273,13 +454,65 @@ class App(ctk.CTk):
             outcome, winner_team_id = OUTCOME_ERROR, None
 
         try:
-            self.tournament_service.complete_match(match_id, outcome, winner_team_id, snap["elapsed"])
+            completed_match = self.tournament_service.complete_match(match_id, outcome, winner_team_id, snap["elapsed"])
         except TournamentValidationError:
-            pass
+            completed_match = None
+
+        if completed_match is not None:
+            self._record_match_result(completed_match, snap)
+            self._log_runtime("match_completed", match_id=match_id, outcome=outcome)
+            if outcome == OUTCOME_DRAW:
+                self._push_alert(live_state.Alert(live_state.SEVERITY_WARNING, "alert_match_draw", {}, time.time()))
+            else:
+                self._push_alert(live_state.Alert(live_state.SEVERITY_SUCCESS, "alert_match_completed", {}, time.time()))
+
+        self._teardown_active_match()
+
+    def _teardown_active_match(self):
+        """Clears active-match ownership and refreshes every view that
+        reads it — the ONE place this happens, called from both a normal
+        completion (_finish_active_match) and an admin Stop
+        (_stop_active_match), so ownership can never be left dangling."""
         self.active_match_id = None
         self.match_context = None
+        self.match_events = []
         if hasattr(self, "competitions_view"):
             self.competitions_view.refresh()
+        if hasattr(self, "results_view"):
+            self.results_view.refresh()
+        if hasattr(self, "live_monitor_view"):
+            self.live_monitor_view.refresh()
+
+    def _record_match_result(self, match, snap: dict):
+        """Builds the real-battle telemetry (spec section 3: only metrics
+        the engine actually produced) and hands it + the match's captured
+        event timeline to ResultService. Damage totals are summed from
+        `self.match_events` — the events accumulated tick-by-tick in
+        _tick() from this same match's own runner.snapshot() calls, never
+        a second, independent read of the engine (avoids the exact
+        snapshot()-draining race a Phase 4 manual-verification script hit
+        by calling snapshot() a second time outside _tick())."""
+        ship_a, ship_b = snap["ship_a"], snap["ship_b"]
+        name_a, name_b = ship_a["team"], ship_b["team"]
+
+        def _dealt(team_name):
+            return sum(
+                e.data.get("amount", 0.0) for e in self.match_events
+                if e.kind == ev.DAMAGE and e.team == team_name
+            )
+
+        def _received(team_name):
+            return sum(
+                e.data.get("amount", 0.0) for e in self.match_events
+                if e.kind == ev.DAMAGE and e.data.get("target_team") == team_name
+            )
+
+        battle_stats = {
+            "team_a_hp_remaining": ship_a["hp"], "team_b_hp_remaining": ship_b["hp"],
+            "team_a_damage_dealt": _dealt(name_a), "team_b_damage_dealt": _dealt(name_b),
+            "team_a_damage_received": _received(name_a), "team_b_damage_received": _received(name_b),
+        }
+        self.result_service.record_from_match(match, battle_stats, self.match_events)
 
     def _team_stats(self, team_name: str):
         self.competition.ensure_team(team_name)
@@ -343,6 +576,8 @@ class App(ctk.CTk):
         self._build_challenges_content()
         self._build_submissions_content()
         self._build_competition_content()
+        self._build_results_content()
+        self._build_live_monitor_content()
         self._build_bottom()
 
     def _build_dashboard_content(self):
@@ -358,7 +593,7 @@ class App(ctk.CTk):
         self.pause_btn.pack(side="left", padx=4, pady=8)
         self.reset_btn = ctk.CTkButton(
             controls, text=t("reset"), fg_color="transparent", border_width=1,
-            border_color=self.tokens.danger, text_color=self.tokens.danger, command=self._reset,
+            border_color=self.tokens.danger, text_color=self.tokens.danger, command=self._confirm_reset,
         )
         self.reset_btn.pack(side="left", padx=4, pady=8)
 
@@ -434,6 +669,26 @@ class App(ctk.CTk):
     def _on_competition_changed(self):
         pass  # tournament data doesn't feed back into the live engine except via _on_start_match
 
+    def _build_results_content(self):
+        self.results_view = ResultsView(
+            self.main_area, self.tokens, self.result_service, self.tournament_service,
+            self.team_service, self.challenge_service,
+        )
+        self.results_view.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.results_view.grid_remove()
+
+    def _build_live_monitor_content(self):
+        self.live_monitor_view = LiveMonitorView(
+            self.main_area, self.tokens,
+            tournament_service=self.tournament_service, team_service=self.team_service,
+            challenge_service=self.challenge_service, result_service=self.result_service,
+            on_start_match=self._on_start_match, on_pause=self._on_pause, on_resume=self._on_resume,
+            on_confirm_reset=self._confirm_reset, on_confirm_stop=self._confirm_stop,
+            on_acknowledge_error=self._on_acknowledge_error,
+        )
+        self.live_monitor_view.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.live_monitor_view.grid_remove()
+
     def _build_bottom(self):
         self.status_bar = StatusBar(self.bottom_area, self.tokens)
         self.status_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
@@ -458,6 +713,8 @@ class App(ctk.CTk):
         self.challenges_view.grid_remove()
         self.submissions_view.grid_remove()
         self.competitions_view.grid_remove()
+        self.results_view.grid_remove()
+        self.live_monitor_view.grid_remove()
         self.dashboard_left.grid_remove()
         self.dashboard_right.grid_remove()
 
@@ -473,6 +730,12 @@ class App(ctk.CTk):
         elif key == "competition":
             self.competitions_view.refresh()
             self.competitions_view.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        elif key == "leaderboard":
+            self.results_view.refresh()
+            self.results_view.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        elif key == "live":
+            self.live_monitor_view.refresh()
+            self.live_monitor_view.grid(row=0, column=0, columnspan=2, sticky="nsew")
         elif implemented:
             self.dashboard_left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
             self.dashboard_right.grid(row=0, column=1, sticky="nsew")
@@ -492,11 +755,36 @@ class App(ctk.CTk):
 
     # ----------------------------------------------------------------- tick
     def _tick(self):
+        """The ONE authoritative event-drain point (spec section 25).
+        `runner.snapshot()` is called exactly once per tick, right here —
+        every other component (BattlePanel excepted; it renders straight
+        from the engine at its own 60fps pygame clock, same as before
+        Phase 6) reads `snap`/`new_events` handed to it from this single
+        call, never calling snapshot() itself. This is the same
+        discipline _is_team_active()/_record_match_result()'s docstrings
+        already establish; Phase 6 just widens the set of consumers fed
+        from this one call (live event stream, alerts, team code status,
+        runtime state) rather than introducing a second drain point."""
+        now = time.perf_counter()
+        if self._last_tick_perf is not None and now > self._last_tick_perf:
+            self.ui_update_hz = 1.0 / (now - self._last_tick_perf)
+        self._last_tick_perf = now
+
         snap = self.runner.snapshot()
         self._last_snapshot = snap
-        self.competition.ingest(snap["new_events"])
+        new_events = snap["new_events"]
+
+        # ---- single-drain distribution ----
+        self.competition.ingest(new_events)
+        self.live_events.extend(new_events)
+        if len(self.live_events) > LIVE_EVENT_BUFFER:
+            self.live_events = self.live_events[-LIVE_EVENT_BUFFER:]
+        self._update_team_code_status(snap, new_events)
+        for alert in live_state.alerts_from_events(new_events, snap["ship_a"]["team"], snap["ship_b"]["team"]):
+            self._push_alert(alert)
 
         if self.active_match_id is not None:
+            self.match_events.extend(new_events)
             if snap["ended"]:
                 self._finish_active_match(snap)
             elif hasattr(self, "match_context") and self.match_context:
@@ -510,19 +798,26 @@ class App(ctk.CTk):
         self.competition.ensure_team(snap["ship_a"]["team"])
         self.competition.ensure_team(snap["ship_b"]["team"])
 
-        self.topbar.update_status(snap)
+        self.runtime_state = live_state.compute_runtime_state(
+            snap, self.active_match_id, self.admin_stopped, self.engine_fault,
+        )
+        is_draw = live_state.is_draw_outcome(snap)
+
+        self.topbar.update_status(snap, self.runtime_state)
 
         ranked = self.competition.ranked()
         score_map = {r.team: r.score for r in ranked}
         self.team_panel.update_from_snapshot(
-            snap, score_map.get(snap["ship_a"]["team"], 0), score_map.get(snap["ship_b"]["team"], 0),
+            snap, score_map.get(snap["ship_a"]["team"], 0), score_map.get(snap["ship_b"]["team"], 0), is_draw,
         )
 
         ship_by_team = {snap["ship_a"]["team"]: snap["ship_a"], snap["ship_b"]["team"]: snap["ship_b"]}
         rows = []
         for i, rec in enumerate(ranked, start=1):
             ship = ship_by_team.get(rec.team)
-            if ship is not None:
+            if is_draw and ship is not None:
+                status_key = "draw"
+            elif ship is not None:
                 status_key = "active" if ship["alive"] else "destroyed"
                 if ship["alive"] and ship["hp_pct"] < 0.5:
                     status_key = "damaged"
@@ -539,6 +834,15 @@ class App(ctk.CTk):
         embedded_fps = self.battle_panel.last_fps if self.battle_panel.embedded else None
         self.status_bar.update_values(snap, overall_valid, embedded_fps)
 
+        if hasattr(self, "live_monitor_view"):
+            self.live_monitor_view.update_from_tick(
+                snap=snap, runtime_state=self.runtime_state, active_match_id=self.active_match_id,
+                match_context=getattr(self, "match_context", None), team_code_status=self.team_code_status,
+                last_target=self.last_target, live_events=self.live_events, alerts=self.alerts,
+                runtime_log=self.runtime_log, ui_update_hz=self.ui_update_hz, embedded_fps=embedded_fps,
+                engine_faults=self._engine_faults, can_acknowledge_error=self.can_acknowledge_error(),
+            )
+
         # Refresh the Teams list periodically (not every tick — rebuilding
         # it destroys/recreates widgets, which would wipe out anything the
         # admin is mid-typing in a create/edit form) and only in list mode,
@@ -552,11 +856,37 @@ class App(ctk.CTk):
 
         self.after(66, self._tick)
 
+    def _update_team_code_status(self, snap: dict, new_events: list):
+        """Updates last_team_code_kind/last_target from this tick's real
+        events only (part of the single-drain distribution above), then
+        recomputes team_code_status via the pure function in live_state.py."""
+        name_a, name_b = snap["ship_a"]["team"], snap["ship_b"]["team"]
+        for e in new_events:
+            if e.kind in (ev.CODE_EXECUTED, ev.CODE_ERROR, ev.CODE_TIMEOUT):
+                if e.team == name_a:
+                    self.last_team_code_kind["alpha"] = e.kind
+                elif e.team == name_b:
+                    self.last_team_code_kind["beta"] = e.kind
+            elif e.kind == ev.TARGET_ACQUIRED:
+                target_id = e.data.get("target_id")
+                target_name = name_b if target_id == "beta" else (name_a if target_id == "alpha" else None)
+                if e.team == name_a:
+                    self.last_target["alpha"] = target_name
+                elif e.team == name_b:
+                    self.last_target["beta"] = target_name
+        self.team_code_status = {
+            "alpha": live_state.compute_team_code_status(snap, name_a, self.last_team_code_kind["alpha"]),
+            "beta": live_state.compute_team_code_status(snap, name_b, self.last_team_code_kind["beta"]),
+        }
+
     def _on_close(self):
         try:
             self.battle_panel.shutdown()
         except Exception:
             pass
+        # stop_thread() already calls engine.shutdown_workers() (see
+        # engine/runner.py) — no isolated worker process may outlive the
+        # app (spec section 6/35).
         self.runner.stop_thread()
         self.destroy()
 

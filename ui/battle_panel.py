@@ -130,7 +130,12 @@ class BattlePanel(ctk.CTkFrame):
         if self._shutting_down or not self.embedded or self._pg_screen is None:
             return
         try:
-            snap = self.runner.snapshot()
+            # Phase 7: snapshot_for_render(), never snapshot() — this
+            # runs on its own ~60fps after() loop, independent of
+            # ui/app.py's _tick(); sharing the draining snapshot() here
+            # was a real, pre-existing event-stealing race (see
+            # BattleRunner.snapshot_for_render()'s docstring).
+            snap = self.runner.snapshot_for_render()
             self._pg_screen.fill((20, 28, 37))
             self._arena_renderer.draw(self._pg_screen, snap, font_small=self._font_small)
             pygame.display.flip()

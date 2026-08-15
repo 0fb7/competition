@@ -19,6 +19,11 @@ _id_counter = itertools.count(1)
 # Event kinds emitted by BattleEngine.step()
 CODE_EXECUTED = "code_executed"
 CODE_ERROR = "code_error"
+# Phase 7: a participant's decide() exceeded engine.config.code_execution_timeout
+# and its isolated worker was forcibly terminated — deliberately a
+# DIFFERENT kind from CODE_ERROR (a raised exception) so the two are
+# never conflated in events/alerts/team-status (spec section 5/9).
+CODE_TIMEOUT = "code_timeout"
 TARGET_ACQUIRED = "target_acquired"
 ATTACK = "attack"
 DAMAGE = "damage"

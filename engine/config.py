@@ -50,6 +50,13 @@ class BattleConfig:
     # None = every engine API function is available, same as before
     # Phase 2 (no filtering happened at all).
     allowed_api: list[str] | None = None
+    # Phase 7: the single source of truth for how long a participant's
+    # decide() is allowed to run before its isolated worker process is
+    # forcibly terminated (engine/worker.py). Only enforced when a
+    # BattleEngine is constructed with isolate_execution=True (live
+    # BattleRunner battles) — see engine/battle.py's docstring for why
+    # this is opt-in rather than a global default.
+    code_execution_timeout: float = 2.0
 
     def validate(self) -> None:
         if self.max_hp <= 0:
@@ -72,6 +79,8 @@ class BattleConfig:
             raise ValueError("sensor_range must be > 0")
         if self.battle_duration is not None and self.battle_duration <= 0:
             raise ValueError("battle_duration must be > 0 or None")
+        if self.code_execution_timeout <= 0:
+            raise ValueError("code_execution_timeout must be > 0")
         if self.win_condition not in WIN_CONDITIONS:
             raise ValueError(f"invalid win_condition: {self.win_condition}")
         if self.allowed_api is not None:

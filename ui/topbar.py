@@ -1,6 +1,6 @@
 import customtkinter as ctk
 
-from . import theme
+from . import theme, live_state
 from .localization import t
 
 
@@ -73,10 +73,23 @@ class TopBar(ctk.CTkFrame):
             self.ar_btn.configure(fg_color="transparent", text_color=self.tokens.text_faint)
             self.en_btn.configure(fg_color=self.tokens.accent, text_color=self.tokens.white)
 
-    def update_status(self, snapshot: dict):
+    # Runtime-state -> (localization key, color) — the single source of
+    # truth for "what state are we in" is live_state.compute_runtime_state()
+    # (called once per tick in ui/app.py); this just maps that real state
+    # to a label, it never re-derives the state itself (spec section 25).
+    _STATE_STYLE = {
+        "IDLE": ("idle", "text_faint"), "PREPARING": ("preparing", "warning"),
+        "RUNNING": ("live", "danger"), "PAUSED": ("paused", "text_faint"),
+        "COMPLETED": ("completed", "accent_glow"), "ERROR": ("error_status", "danger"),
+        "STOPPED": ("stopped", "text_faint"),
+    }
+
+    def update_status(self, snapshot: dict, runtime_state: str = "IDLE"):
         if snapshot["winner"]:
             self.status_pill.configure(text="●  " + snapshot["winner"], text_color=self.tokens.success)
-        elif snapshot["running"]:
-            self.status_pill.configure(text="●  " + t("live"), text_color=self.tokens.danger)
-        else:
-            self.status_pill.configure(text="●  " + t("paused"), text_color=self.tokens.text_faint)
+            return
+        if live_state.is_draw_outcome(snapshot):
+            self.status_pill.configure(text="●  " + t("draw"), text_color=self.tokens.warning)
+            return
+        label_key, color_attr = self._STATE_STYLE.get(runtime_state, ("idle", "text_faint"))
+        self.status_pill.configure(text="●  " + t(label_key), text_color=getattr(self.tokens, color_attr))

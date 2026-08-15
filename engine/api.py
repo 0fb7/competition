@@ -8,7 +8,20 @@ against engine internals.
 
 import math
 
-from .config import BattleConfig
+from .config import BattleConfig, ALL_API_FUNCTIONS
+
+
+class ForbiddenAPIError(Exception):
+    """Phase 7: raised (with a clear, structured message) when team code
+    CALLS a disallowed api[...] function. Distinct from a raw KeyError:
+    before Phase 7, a disallowed function name was simply absent from
+    the dict, so `api["attack"](...)` surfaced as a bare
+    `KeyError: 'attack'` — accurate but unfriendly, and easy to mistake
+    for an engine bug rather than a challenge-configuration rule. Still
+    caught by the same sandbox.run_decide() try/except as any other
+    team-code runtime error (spec section 8: "no engine crash"), so no
+    new failure path is introduced — only the message participants see
+    is improved."""
 
 
 def build_api(pending: dict, config: BattleConfig | None = None) -> dict:
@@ -73,5 +86,23 @@ def build_api(pending: dict, config: BattleConfig | None = None) -> dict:
     }
 
     if config is not None and config.allowed_api is not None:
-        return {name: fn for name, fn in full_api.items() if name in config.allowed_api}
+        # Phase 7: every function name from ALL_API_FUNCTIONS is still
+        # present as a dict key — a disallowed one now maps to a stub
+        # that raises ForbiddenAPIError with a clear message the MOMENT
+        # it's called, instead of vanishing from the dict entirely (which
+        # made `api["attack"](...)` fail as a bare KeyError at the
+        # subscript, before team code even got to call anything). This
+        # also means a static "is this key present" check some team
+        # code might write no longer silently mis-detects availability.
+        allowed = set(config.allowed_api)
+        return {
+            name: (full_api[name] if name in allowed else _forbidden_stub(name))
+            for name in ALL_API_FUNCTIONS
+        }
     return full_api
+
+
+def _forbidden_stub(name: str):
+    def _stub(*_args, **_kwargs):
+        raise ForbiddenAPIError(f"API function '{name}' is not available in this challenge.")
+    return _stub

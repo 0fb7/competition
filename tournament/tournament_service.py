@@ -40,11 +40,21 @@ from .tournament_repository import TournamentRepository
 
 
 class TournamentService:
-    def __init__(self, repository: TournamentRepository, team_service, challenge_service, submission_service):
+    def __init__(
+        self, repository: TournamentRepository, team_service, challenge_service, submission_service,
+        result_service=None,
+    ):
         self.repo = repository
         self.team_service = team_service
         self.challenge_service = challenge_service
         self.submission_service = submission_service
+        # Optional (Phase 5): when provided, lets this service record the
+        # MatchResult for a BYE the instant it's created — a BYE never
+        # reaches ui/app.py's real-battle completion path (_finish_active_
+        # match), so this is the only place a BYE's history gets written.
+        # None keeps this service fully usable standalone, exactly as
+        # Phase 4's tests already construct and exercise it.
+        self.result_service = result_service
 
     # =========================================================== eligibility
     def is_team_eligible(self, team_id: str, challenge_id: str) -> bool:
@@ -207,6 +217,9 @@ class TournamentService:
     def get_round_matches(self, round_id: str) -> list[Match]:
         return self.repo.get_round_matches(round_id)
 
+    def get_competition_matches(self, competition_id: str) -> list[Match]:
+        return self.repo.get_competition_matches(competition_id)
+
     # ---------------------------------------------------------- match creation
     def _next_match_number(self, competition_id: str) -> int:
         return len(self.repo.get_competition_matches(competition_id)) + 1
@@ -247,6 +260,13 @@ class TournamentService:
         self.repo.create_match(match)
         round_obj.match_ids.append(match.id)
         self.repo.update_round(round_obj.id, match_ids=round_obj.match_ids)
+
+        if is_bye and self.result_service is not None:
+            # No battle ever ran, so hp/damage stay unset (None) — see
+            # results/result_service.py's docstring; a BYE record exists
+            # purely so Match History shows what actually happened.
+            self.result_service.record_from_match(match)
+
         return match
 
     def generate_round_robin(self, round_id: str) -> list[Match]:
@@ -399,11 +419,22 @@ class TournamentService:
         self._check_round_completion(match.round_id)
         return updated
 
-    def error_match(self, match_id: str, _message: str = "") -> Match:
+    def error_match(self, match_id: str, _message: str = "", duration: Optional[float] = None) -> Match:
+        """Also the Phase 6 STOP path (ui/app.py._on_stop_match): an
+        admin-initiated stop of a RUNNING match is recorded as ERROR, not
+        a fake win — no `status != M_RUNNING` guard is enforced here
+        because this method already had no status restriction in Phase 4
+        (never wired to any UI trigger back then) and STOP must be able
+        to reach a match from PREPARING/RUNNING alike. `duration`, when
+        given, is the real elapsed simulation time at the moment of the
+        stop (spec section 12) — never fabricated, never defaulted to a
+        full/complete duration."""
         match = self.repo.get_match(match_id)
         if match is None:
             raise KeyError(match_id)
-        updated = self.repo.update_match(match_id, status=M_ERROR, outcome=OUTCOME_ERROR, ended_at=utc_now_iso())
+        updated = self.repo.update_match(
+            match_id, status=M_ERROR, outcome=OUTCOME_ERROR, ended_at=utc_now_iso(), battle_duration=duration,
+        )
         self._check_round_completion(match.round_id)
         return updated
 

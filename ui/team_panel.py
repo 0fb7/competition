@@ -57,13 +57,18 @@ class TeamCard(ctk.CTkFrame):
         prev_values = {k: v[1].cget("text") for k, v in self.rows.items()}
         self._build()
 
-    def update_from(self, ship: dict, score: int):
+    def update_from(self, ship: dict, score: int, is_draw: bool = False):
         self.name_lbl.configure(text=ship["team"].upper())
         alive = ship["alive"]
-        status_key = "active" if alive else "destroyed"
-        color = self.tokens.success if alive else self.tokens.danger
-        if alive and ship["hp_pct"] < 0.5:
-            status_key, color = "damaged", self.tokens.warning
+        if is_draw:
+            # DRAW is a distinct, first-class status — never rendered as
+            # ACTIVE/DAMAGED/DESTROYED (spec sections 9/21/24).
+            status_key, color = "draw", self.tokens.warning
+        else:
+            status_key = "active" if alive else "destroyed"
+            color = self.tokens.success if alive else self.tokens.danger
+            if alive and ship["hp_pct"] < 0.5:
+                status_key, color = "damaged", self.tokens.warning
         self.status_pill.configure(text=t(status_key), fg_color=color)
 
         values = {
@@ -109,6 +114,6 @@ class TeamPanel(ctk.CTkFrame):
         self.card_a.apply_language()
         self.card_b.apply_language()
 
-    def update_from_snapshot(self, snapshot: dict, score_a: int, score_b: int):
-        self.card_a.update_from(snapshot["ship_a"], score_a)
-        self.card_b.update_from(snapshot["ship_b"], score_b)
+    def update_from_snapshot(self, snapshot: dict, score_a: int, score_b: int, is_draw: bool = False):
+        self.card_a.update_from(snapshot["ship_a"], score_a, is_draw)
+        self.card_b.update_from(snapshot["ship_b"], score_b, is_draw)

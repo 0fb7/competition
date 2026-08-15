@@ -6,10 +6,10 @@ ChallengeService, which goes through this repository.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 
+from storage import read_json_file, write_json_file_atomic
 from .challenge import Challenge
 
 
@@ -22,16 +22,12 @@ class ChallengeRepository:
             self._write({})
 
     def _read(self) -> dict:
-        with open(self.path, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = read_json_file(self.path)
         return {cid: Challenge.from_dict(c) for cid, c in raw.items()}
 
     def _write(self, challenges: dict) -> None:
         raw = {cid: c.to_dict() if isinstance(c, Challenge) else c for cid, c in challenges.items()}
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, self.path)
+        write_json_file_atomic(self.path, raw)
 
     def create_challenge(self, challenge: Challenge) -> Challenge:
         with self._lock:

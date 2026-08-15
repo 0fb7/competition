@@ -10,10 +10,10 @@ tournament_service.py.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 
+from storage import read_json_file, write_json_file_atomic
 from .competition import Competition
 from .match import Match
 from .round import Round
@@ -33,16 +33,12 @@ class TournamentRepository:
 
     # ---- internal ----
     def _read(self, path: str, cls) -> dict:
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = read_json_file(path)
         return {k: cls.from_dict(v) for k, v in raw.items()}
 
     def _write(self, path: str, items: dict) -> None:
         raw = {k: (v.to_dict() if hasattr(v, "to_dict") else v) for k, v in items.items()}
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        write_json_file_atomic(path, raw)
 
     # ============================================================ competitions
     def create_competition(self, competition: Competition) -> Competition:

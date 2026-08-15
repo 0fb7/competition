@@ -10,7 +10,8 @@ NAV_ITEMS = [
     ("code", "nav_code"),
     ("challenges", "nav_challenges"),
     ("competition", "nav_competition"),
-    ("leaderboard", "nav_leaderboard"),
+    ("live", "nav_live_monitor"),
+    ("leaderboard", "nav_results"),
     ("logs", "nav_logs"),
     ("settings", "nav_settings"),
 ]
@@ -18,7 +19,7 @@ NAV_ITEMS = [
 # Only these route to real, populated content; the rest show an honest
 # "not built yet" placeholder rather than faking data for a tab with no
 # backing feature.
-IMPLEMENTED_TABS = {"dashboard", "arena", "teams", "code", "challenges", "competition", "leaderboard", "logs"}
+IMPLEMENTED_TABS = {"dashboard", "arena", "teams", "code", "challenges", "competition", "live", "leaderboard", "logs"}
 
 
 class Sidebar(ctk.CTkFrame):

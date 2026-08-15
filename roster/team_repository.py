@@ -6,10 +6,10 @@ goes through TeamService, which goes through this repository.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 
+from storage import read_json_file, write_json_file_atomic
 from .team import Member, Team
 
 
@@ -23,16 +23,12 @@ class TeamRepository:
 
     # ---- internal ----
     def _read(self) -> dict:
-        with open(self.path, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = read_json_file(self.path)
         return {tid: Team.from_dict(t) for tid, t in raw.items()}
 
     def _write(self, teams: dict) -> None:
         raw = {tid: team.to_dict() if isinstance(team, Team) else team for tid, team in teams.items()}
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, self.path)
+        write_json_file_atomic(self.path, raw)
 
     # ---- team CRUD ----
     def create_team(self, team: Team) -> Team:

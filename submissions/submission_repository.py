@@ -11,10 +11,10 @@ SUBMITTED, independent of whatever the caller thinks the status is.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 
+from storage import read_json_file, write_json_file_atomic
 from .submission import ImmutableSubmissionError, STATUS_SUBMITTED, Submission
 
 
@@ -27,16 +27,12 @@ class SubmissionRepository:
             self._write({})
 
     def _read(self) -> dict:
-        with open(self.path, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = read_json_file(self.path)
         return {sid: Submission.from_dict(s) for sid, s in raw.items()}
 
     def _write(self, submissions: dict) -> None:
         raw = {sid: s.to_dict() if isinstance(s, Submission) else s for sid, s in submissions.items()}
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, self.path)
+        write_json_file_atomic(self.path, raw)
 
     # ---- create / read ----
     def create_submission(self, submission: Submission) -> Submission:

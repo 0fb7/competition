@@ -503,3 +503,30 @@ class CompetitionView(ctk.CTkFrame):
                 state="normal" if can_start else "disabled",
                 command=lambda mid=match.id: self.on_start_match(mid),
             ).pack(side="right")
+
+        # Phase 7: TournamentService.cancel_match() only ever accepted
+        # PENDING/READY matches (a match that's already RUNNING or
+        # COMPLETED was never cancellable — that guard is unchanged) but
+        # had no UI path at all before this. A cancelled match is a
+        # distinct, non-fake outcome — never a WIN/DRAW/ERROR — and
+        # never produces a MatchResult (spec section 14; no battle ever
+        # happened, exactly like a never-started match has no history).
+        if not match.is_bye and match.status in (M_PENDING, M_READY):
+            ctk.CTkButton(
+                right, text=t("cancel_match"), width=90, height=22, font=theme.font(9),
+                fg_color="transparent", border_width=1, border_color=self.tokens.danger,
+                text_color=self.tokens.danger,
+                command=lambda mid=match.id: self._confirm_cancel_match(mid),
+            ).pack(side="right", padx=(0, 6))
+
+    def _confirm_cancel_match(self, match_id: str):
+        if not messagebox.askyesno(t("cancel_match"), t("confirm_cancel_match")):
+            return
+        self._clear_error()
+        try:
+            self.service.cancel_match(match_id)
+        except ValidationError as e:
+            self._show_error(str(e))
+            return
+        self.refresh()
+        self.on_changed()

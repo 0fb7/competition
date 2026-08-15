@@ -78,6 +78,23 @@ class Ship:
         if self.hp <= 0:
             self.alive = False
 
+    def snapshot_after_cooldown_tick(self, dt: float) -> dict:
+        """Phase 7: a PURE projection of what snapshot() would return
+        after tick_cooldowns(dt) — same arithmetic, but does not mutate
+        this Ship. Lets BattleEngine.gather_decisions() compute exactly
+        what decide() should see (same values team code always saw,
+        cooldown/energy already ticked) WITHOUT touching real engine
+        state outside BattleRunner's lock; the real tick_cooldowns(dt)
+        call still happens later, under the lock, in apply_decisions()."""
+        cooldown = max(0.0, self.attack_cooldown - dt) if self.attack_cooldown > 0 else self.attack_cooldown
+        energy = min(self.config.max_energy, self.energy + self.config.energy_regen_rate * dt)
+        snap = self.snapshot()
+        snap["energy"] = energy
+        snap["energy_pct"] = energy / self.config.max_energy
+        snap["attack_cooldown"] = cooldown
+        snap["attack_ready"] = cooldown <= 0 and energy >= self.config.attack_energy_cost
+        return snap
+
     def snapshot(self) -> dict:
         """Read-only view handed to team code — no engine references leak out."""
         return {
@@ -93,4 +110,5 @@ class Ship:
             "energy_pct": self.energy / self.config.max_energy,
             "alive": self.alive,
             "attack_ready": self.attack_cooldown <= 0 and self.energy >= self.config.attack_energy_cost,
+            "attack_cooldown": self.attack_cooldown,
         }

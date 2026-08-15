@@ -53,8 +53,15 @@ class Scoreboard(ctk.CTkFrame):
                 str(row["losses"]), f"{row['damage']:.0f}", t(row["status_key"]),
             ]
             colors = [self.tokens.text_faint, self.tokens.text] + [self.tokens.text] * 4
-            colors[-1] = self.tokens.success if row["status_key"] == "active" else (
-                self.tokens.warning if row["status_key"] == "damaged" else self.tokens.danger
-            )
+            # DRAW gets its own distinct color — never reuses the ACTIVE
+            # (success/green) or DESTROYED (danger/red) styling (spec
+            # sections 9/21/24; closes backlog item 6 in the LIVE
+            # scoreboard specifically, not just the historical one).
+            if row["status_key"] == "active":
+                colors[-1] = self.tokens.success
+            elif row["status_key"] in ("damaged", "draw"):
+                colors[-1] = self.tokens.warning
+            else:
+                colors[-1] = self.tokens.danger
             for w, v, c in zip(widgets, values, colors):
                 w.configure(text=v, text_color=c)

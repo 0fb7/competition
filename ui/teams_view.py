@@ -307,14 +307,32 @@ class TeamsView(ctk.CTkFrame):
 
     def _save_detail(self, team_id: str):
         self._clear_error()
+        team_before = self.service.get_team(team_id)
         name = self.detail_name_entry.get()
         ship_choice = self.detail_ship_menu.get()
         ship_id = None if ship_choice == t("unassigned") else ship_choice.lower()
+
+        # Phase 7: a ship reassignment never corrupts the live battle —
+        # BattleEngine keeps ticking whatever ship identity it already
+        # loaded until the next Reset (App._sync_engine_state() already
+        # skips re-syncing while a battle is genuinely ongoing, unchanged
+        # since Phase 1). This just makes that deferral visible instead
+        # of silent, per spec section 13.
+        ship_changing = team_before is not None and ship_id != team_before.ship_id
+        was_in_battle = (
+            ship_changing and team_before is not None
+            and self.service.compute_status(team_before) == STATUS_IN_BATTLE
+        )
+
         try:
             self.service.update_team(team_id, name=name, ship_id=ship_id)
         except ValidationError as e:
             self._show_error(str(e))
             return
+
+        if was_in_battle:
+            messagebox.showinfo(t("assign_ship"), t("ship_change_pending_reset"))
+
         self.refresh()
         self.on_changed()
 

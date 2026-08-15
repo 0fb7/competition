@@ -146,6 +146,34 @@ class TeamService:
         if self.is_team_active(team_id):
             raise ValidationError("cannot_delete_active")
         self.repo.delete_team(team_id)
+        self._cleanup_orphaned_submission_stub(team)
+
+    def _cleanup_orphaned_submission_stub(self, team: Team) -> None:
+        """Phase 7 backlog item: create_team() writes a starter stub to
+        self.submissions_dir/<team_id>.py (see create_team() below); once
+        the Team record is gone, that file is orphaned. Deletes it IF AND
+        ONLY IF it actually lives inside this service's own submissions_dir
+        — the default Alpha/Beta teams point at teams/team_alpha.py and
+        teams/team_beta.py (checked-in project files, a different
+        directory entirely), so this can never delete those or any other
+        team's file, even by path-name coincidence. Best-effort: a
+        missing file or a permissions error here must never prevent the
+        Team record itself from having been deleted (already done above),
+        and never touches submissions/submissions.json's historical
+        Submission records or anything results/ has persisted — those
+        stay fully intact and readable (spec section 12)."""
+        path = team.submission_id
+        if not path:
+            return
+        try:
+            stub_dir = os.path.realpath(self.submissions_dir)
+            file_dir = os.path.realpath(os.path.dirname(path))
+            if file_dir != stub_dir:
+                return  # not one of our generated stubs — never touch it
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass  # cleanup is best-effort; the Team record deletion already succeeded
 
     # ----------------------------------------------------------- members
     def add_member(self, team_id: str, name: str) -> Team:
