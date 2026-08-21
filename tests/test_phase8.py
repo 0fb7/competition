@@ -28,8 +28,9 @@ from submissions.submission_service import SubmissionService, ValidationError as
 from submissions.submission import TEST_PASSED, TEST_FAILED, TEST_TIMEOUT, TEST_ERROR
 from submissions.test_runner import run_test
 from tournament.competition import ValidationError as TournamentValidationError
-from tournament.match import OUTCOME_TEAM_A_WIN
+from tournament.match import OUTCOME_TEAM_A_WIN, STATUS_ERROR as M_ERROR
 from tournament.round import TYPE_SINGLE_ELIMINATION, TYPE_ROUND_ROBIN, STATUS_COMPLETED as R_COMPLETED
+from engine.sandbox import compile_team_module, SandboxError
 from tournament.tournament_repository import TournamentRepository
 from tournament.tournament_service import TournamentService
 from ui import live_state, localization, status_style
@@ -471,6 +472,115 @@ def test_existing_tournament_and_results_still_pass():
     shutil.rmtree(tmp)
 
 
+# ==================================================== 25-26 Final Product Audit fix 1: delete_competition historical guard
+def test_delete_competition_blocked_when_a_match_errored():
+    """The exact orphan sequence the Final Product Audit reproduced:
+    Match -> ERROR -> MatchResult recorded -> complete_competition() ->
+    delete_competition() used to succeed, orphaning the MatchResult."""
+    tmp, team_svc, ch_svc, sub_svc, t_svc, r_svc, challenge, ids = _fresh_tournament_env(n_teams=2)
+    t_svc.create_competition("champ", "Championship", challenge_id=challenge.id)
+    for tid in ids:
+        t_svc.add_team("champ", tid)
+    r = t_svc.create_round("champ", "Round 1", TYPE_ROUND_ROBIN)
+    matches = t_svc.generate_round_robin(r.id)
+    t_svc.mark_ready("champ")
+    t_svc.start_competition("champ")
+    m = matches[0]
+    t_svc.prepare_match_for_start(m.id)
+    errored = t_svc.error_match(m.id, "engine_fault", duration=3.0)
+    assert errored.status == M_ERROR
+    result = r_svc.record_from_match(errored, None, [])
+    assert result is not None
+
+    t_svc.complete_competition("champ")
+
+    try:
+        t_svc.delete_competition("champ")
+        raise AssertionError("deleting a competition with an ERRORed, recorded match must be blocked")
+    except TournamentValidationError as e:
+        assert str(e) == "cannot_delete_historical"
+
+    # Deletion was rejected -> everything must still be exactly as it was.
+    assert t_svc.get_competition("champ") is not None
+    still_recorded = r_svc.get_match_result(m.id)
+    assert still_recorded is not None
+    assert still_recorded.outcome == "ERROR"
+    assert still_recorded.competition_id == "champ"
+    shutil.rmtree(tmp)
+
+
+def test_delete_competition_still_allowed_with_only_cancelled_matches():
+    """A cancelled match never produces a MatchResult (unchanged Phase 5
+    rule) — deletion must NOT be blocked just because a match was
+    cancelled; only real historical (COMPLETED/ERROR) matches should
+    block it."""
+    tmp, team_svc, ch_svc, sub_svc, t_svc, r_svc, challenge, ids = _fresh_tournament_env(n_teams=2)
+    t_svc.create_competition("champ", "Championship", challenge_id=challenge.id)
+    for tid in ids:
+        t_svc.add_team("champ", tid)
+    r = t_svc.create_round("champ", "Round 1", TYPE_ROUND_ROBIN)
+    matches = t_svc.generate_round_robin(r.id)
+    cancelled = t_svc.cancel_match(matches[0].id)
+    assert r_svc.get_match_result(cancelled.id) is None
+
+    t_svc.delete_competition("champ")  # must not raise
+    assert t_svc.get_competition("champ") is None
+    shutil.rmtree(tmp)
+
+
+# ==================================================== 27-30 Final Product Audit fix 2: sandbox dunder-format bypass
+def test_sandbox_direct_dunder_access_still_rejected():
+    code = "def decide(friendly, enemies, api):\n    x = friendly.__class__\n"
+    try:
+        compile_team_module(code)
+        raise AssertionError("direct dunder attribute access must still be rejected")
+    except SandboxError:
+        pass
+
+
+def test_sandbox_format_dunder_bypass_rejected():
+    code = (
+        "def decide(friendly, enemies, api):\n"
+        "    s = ''\n"
+        "    x = '{0.__class__.__mro__[1].__subclasses__}'.format(s)\n"
+    )
+    try:
+        compile_team_module(code)
+        raise AssertionError("str.format() dunder-chain bypass must be rejected")
+    except SandboxError as e:
+        assert "format" in str(e) or "dunder" in str(e)
+
+
+def test_sandbox_format_map_dunder_bypass_rejected():
+    code = (
+        "def decide(friendly, enemies, api):\n"
+        "    s = ''\n"
+        "    x = '{0.__globals__}'.format_map({0: s})\n"
+    )
+    try:
+        compile_team_module(code)
+        raise AssertionError("str.format_map() dunder-chain bypass must be rejected")
+    except SandboxError:
+        pass
+
+
+def test_sandbox_harmless_format_strings_still_allowed():
+    code = (
+        "def decide(friendly, enemies, api):\n"
+        "    x = 'Target: {0}, distance: {1:.1f}'.format('enemy', 5.0)\n"
+        "    api['log'](x)\n"
+        "    my__local = 3\n"
+        "    api['log'](str(my__local))\n"
+    )
+    compile_team_module(code)  # must not raise
+
+
+def test_sandbox_legitimate_team_code_unaffected():
+    for filename in ("team_alpha.py", "team_beta.py"):
+        code = open(os.path.join(ROOT, "teams", filename), encoding="utf-8").read()
+        compile_team_module(code)  # must not raise
+
+
 if __name__ == "__main__":
     tests = [
         test_submission_test_normal_success, test_submission_test_normal_failure,
@@ -491,6 +601,10 @@ if __name__ == "__main__":
         test_corrupted_json_raises_typed_error_not_raw_exception, test_app_main_shows_controlled_dialog_not_raw_traceback,
         test_en_ar_phase8_keys_present,
         test_existing_engine_tests_still_pass, test_existing_tournament_and_results_still_pass,
+        test_delete_competition_blocked_when_a_match_errored, test_delete_competition_still_allowed_with_only_cancelled_matches,
+        test_sandbox_direct_dunder_access_still_rejected, test_sandbox_format_dunder_bypass_rejected,
+        test_sandbox_format_map_dunder_bypass_rejected, test_sandbox_harmless_format_strings_still_allowed,
+        test_sandbox_legitimate_team_code_unaffected,
     ]
     for fn in tests:
         print(f"{fn.__name__} ...")

@@ -18,6 +18,7 @@ alone. Swap in subprocess/container isolation before that's a requirement.
 
 import ast
 import math
+import re
 
 # node types that are always allowed
 _ALLOWED_NODES = {
@@ -54,6 +55,28 @@ _SAFE_MATH = {
     "degrees": math.degrees,
 }
 
+# Final Product Audit fix: str.format()/str.format_map()'s replacement-
+# field mini-language ("{0.__class__.__mro__[1].__subclasses__}") does
+# dotted attribute access at RUNTIME, parsed from the string's own text —
+# it never appears as an ast.Attribute node, so the literal dunder check
+# above (line ~node.attr.startswith("__")) never sees it. This is a real,
+# independently-reproduced bypass of that check (does not by itself reach
+# eval/exec/open or file access — format() only ever returns a string,
+# and there is no ast.ClassDef in _ALLOWED_NODES to build a callable
+# gadget — but it does leak internal interpreter object state as text,
+# which the sandbox's own "dunder poking" claim says it blocks).
+#
+# Scoped narrowly to the actual attack shape (a "{...}" replacement field
+# containing a dotted dunder attribute access) rather than "any string
+# containing __", so ordinary log/status strings — including ones that
+# happen to contain a double underscore, or ordinary "{team_name}"-style
+# replacement fields — are never flagged.
+_DUNDER_FORMAT_PATTERN = re.compile(r"\{[^{}]*\.__\w+")
+
+
+def _string_has_dunder_format_bypass(value: str) -> bool:
+    return bool(_DUNDER_FORMAT_PATTERN.search(value))
+
 
 class SandboxError(Exception):
     pass
@@ -77,6 +100,15 @@ def _iter_issues(tree: ast.AST, allowed_api: list[str] | None = None):
             continue
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             yield ("dunder_access", "dunder attribute access is not allowed", node.lineno, node.col_offset)
+        if (
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and _string_has_dunder_format_bypass(node.value)
+        ):
+            yield (
+                "dunder_format_bypass",
+                "format-string dunder attribute access is not allowed",
+                node.lineno, node.col_offset,
+            )
         if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
             yield ("forbidden_name", f"use of '{node.id}' is not allowed", node.lineno, node.col_offset)
         if isinstance(node, (ast.Import, ast.ImportFrom)):

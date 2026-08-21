@@ -109,7 +109,20 @@ class TournamentService:
         if comp.status in (STATUS_ACTIVE, STATUS_PAUSED):
             raise ValidationError("cannot_delete_active")
         matches = self.repo.get_competition_matches(competition_id)
-        if any(m.status == M_COMPLETED for m in matches):
+        # Final Product Audit fix: ERROR matches already get a permanent
+        # MatchResult recorded (the same results/ pipeline COMPLETED/BYE
+        # matches use — see results/result_service.py's record_from_match(),
+        # called from ui/app.py's _stop_active_match()/_finish_active_match()
+        # for a live-engine fault/stop, and from error_match() callers).
+        # A BYE match is already stored with status M_COMPLETED at creation
+        # (see generate_round_robin/generate_single_elimination above), so
+        # it was already covered by the M_COMPLETED check and needs no
+        # separate case here. CANCELLED is deliberately NOT included: a
+        # cancelled match never produces a MatchResult (spec section 8 /
+        # tests/test_results.py::test_cancelled_result) — there is no
+        # historical record to protect, so blocking on it would only
+        # prevent cleaning up a competition that never actually ran.
+        if any(m.status in (M_COMPLETED, M_ERROR) for m in matches):
             raise ValidationError("cannot_delete_historical")
         for r in self.repo.get_competition_rounds(competition_id):
             for m in self.repo.get_round_matches(r.id):
