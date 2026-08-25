@@ -318,3 +318,43 @@ mislabeled as a bug.
     keys it needs). Audited in Phase 8 (Step 9) and left as a disclosed,
     accepted boundary rather than building a schema-validation layer
     across five dataclass families under this phase's time budget.
+
+## NEW — surfaced during the Final Product Audit
+
+25. **[CLOSED]** `delete_competition()`'s historical-data guard only
+    checked for a `COMPLETED` match, not `ERROR`. An ERRORed match
+    already gets a permanent `MatchResult` recorded through the same
+    `results/result_service.py::record_from_match()` pipeline as a
+    COMPLETED one, so a competition could be `complete_competition()`'d
+    then `delete_competition()`'d after its only match errored,
+    orphaning that MatchResult (its `competition_id` became
+    unresolvable). Fixed in `tournament/tournament_service.py` by
+    checking `m.status in (M_COMPLETED, M_ERROR)` — no new status
+    strings, no cascade-delete, deletion is simply blocked exactly as it
+    already was for COMPLETED. CANCELLED remains deliberately excluded
+    (never produces a MatchResult — nothing to protect). Verified in
+    `tests/test_phase8.py::test_delete_competition_blocked_when_a_match_errored`
+    / `test_delete_competition_still_allowed_with_only_cancelled_matches`.
+
+26. **[CLOSED]** `engine/sandbox.py`'s dunder-attribute check only
+    inspected literal `ast.Attribute` nodes, so `str.format()`/
+    `str.format_map()`'s own dotted-path replacement-field syntax
+    (`"{0.__class__.__mro__[1].__subclasses__}".format(x)`) bypassed it
+    entirely — the dunder chain is parsed by the runtime formatting
+    mini-language from a string literal, never appearing as an
+    `ast.Attribute` node. Verified this could leak internal interpreter
+    object state as text but — with no `ast.ClassDef` in the allowed
+    node set and `eval`/`exec`/`open` never reachable as live callables —
+    could **not** be escalated to code execution or file access. Fixed
+    by scanning string `Constant` nodes for a `{...}` replacement field
+    containing a dotted dunder access (`_DUNDER_FORMAT_PATTERN`),
+    narrowly scoped to that shape so ordinary strings/identifiers
+    containing `__` are unaffected. Verified against the real shipped
+    `teams/team_alpha.py`/`team_beta.py` (unaffected) and against the
+    exact bypass payload (rejected). See item 19 above — the overall
+    security classification (trusted internal/classroom use only, not a
+    hardened sandbox) is unchanged; this closes one specific gap in that
+    already-imperfect boundary, not a claim of new hardening. Verified
+    in `tests/test_phase8.py::test_sandbox_format_dunder_bypass_rejected`
+    / `test_sandbox_format_map_dunder_bypass_rejected` /
+    `test_sandbox_harmless_format_strings_still_allowed`.

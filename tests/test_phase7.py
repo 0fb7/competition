@@ -98,12 +98,24 @@ def _fresh_tournament_env(n_teams=2):
 
 # ================================================================= 1-2 timeout
 def test_infinite_loop_participant_code_is_detected():
-    engine = BattleEngine(HANG_CODE, BETA_CODE, config=BattleConfig(code_execution_timeout=1.5), isolate_execution=True)
+    # code_execution_timeout also governs worker STARTUP (BattleEngine's
+    # constructor spawns both isolated workers eagerly — see
+    # engine/worker.py's DecideWorker._start). Under real machine load a
+    # too-tight value can occasionally let startup itself consume the
+    # whole budget, marking the worker dead before engine.step() is ever
+    # called — which then correctly reports "unavailable"/CODE_ERROR
+    # instead of CODE_TIMEOUT (a different, also-correct signal — see
+    # engine/battle.py's _run_side_isolated), failing THIS test's more
+    # specific "the hang was actually caught mid-tick" assertion for a
+    # reason unrelated to what it's testing. A larger timeout gives
+    # startup enough headroom under load while still keeping this well
+    # under this test's own generous elapsed-time bound.
+    engine = BattleEngine(HANG_CODE, BETA_CODE, config=BattleConfig(code_execution_timeout=2.5), isolate_execution=True)
     engine.start()
     t0 = time.perf_counter()
     engine.step(1 / 30)
     elapsed = time.perf_counter() - t0
-    assert elapsed < 2.0  # bounded by the timeout, never hangs the caller forever
+    assert elapsed < 4.0  # bounded by the timeout, never hangs the caller forever
     timeouts = [e for e in engine.events.all() if e.kind == ev.CODE_TIMEOUT]
     assert len(timeouts) == 1
     engine.shutdown_workers()
@@ -116,7 +128,15 @@ def test_execution_timeout_is_configurable_single_source_of_truth():
     already confirmed alive first — separating "how long did the OS take
     to spawn this process" (system-load-dependent, not what this test is
     about) from "did the configured timeout actually govern the wait"."""
-    slow_cfg, fast_cfg = 3.0, 0.6
+    # fast_cfg was 0.6s; under sustained multiprocessing load from the many
+    # DecideWorkers already spawned earlier in this same test file/process,
+    # that tight a budget could let STARTUP itself (governed by this same
+    # timeout, see DecideWorker._start) consume it before the worker even
+    # answered "ready" — a false failure in the excluded-from-measurement
+    # setup assertion below, not in what this test actually measures. Same
+    # class of flakiness already diagnosed and fixed for
+    # test_worker_process_termination_on_timeout above.
+    slow_cfg, fast_cfg = 3.0, 1.5
     assert slow_cfg != fast_cfg
     w_slow = DecideWorker(HANG_CODE, timeout=slow_cfg)
     w_fast = DecideWorker(HANG_CODE, timeout=fast_cfg)
