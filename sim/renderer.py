@@ -78,21 +78,29 @@ class ArenaRenderer:
 
         self._bg_cache = surf
 
-    def _ingest_events(self, new_events, ship_a_pos, ship_b_pos):
-        pos_by_team = {"Team Alpha": ship_a_pos, "Team Beta": ship_b_pos}
+    def _ingest_events(self, new_events, ship_a_pos, ship_b_pos, team_a_name, team_b_name):
+        # Real competition matches use whatever names the admin gave the
+        # teams (e.g. "Team A"/"Team B"), not always the default "Team
+        # Alpha"/"Team Beta" — this must key off the actual snapshot names,
+        # never hardcoded literals, or an evt.team lookup below raises
+        # KeyError and (since draw() is called from battle_panel.py's
+        # try/except-and-stop-rendering loop) silently kills the arena's
+        # render loop the instant the first real attack/damage event fires.
+        pos_by_team = {team_a_name: ship_a_pos, team_b_name: ship_b_pos}
         now = time.perf_counter()
         for evt in new_events:
             if evt.id in self._seen_event_ids:
                 continue
             self._seen_event_ids.add(evt.id)
+            if evt.team not in pos_by_team:
+                continue
+            opponent_team = team_b_name if evt.team == team_a_name else team_a_name
             if evt.kind == ev.ATTACK:
-                opponent_team = "Team Beta" if evt.team == "Team Alpha" else "Team Alpha"
                 self._projectiles.append({
                     "start": now, "team": evt.team,
                     "from": pos_by_team[evt.team], "to": pos_by_team[opponent_team],
                 })
             elif evt.kind == ev.DAMAGE:
-                opponent_team = "Team Beta" if evt.team == "Team Alpha" else "Team Alpha"
                 self._explosions.append({
                     "start": now, "pos": pos_by_team[opponent_team], "team": evt.team,
                 })
@@ -106,7 +114,7 @@ class ArenaRenderer:
         pos_a = self.world_to_screen(a["x"], a["y"])
         pos_b = self.world_to_screen(b["x"], b["y"])
 
-        self._ingest_events(snapshot.get("new_events", []), pos_a, pos_b)
+        self._ingest_events(snapshot.get("new_events", []), pos_a, pos_b, a["team"], b["team"])
 
         # Challenges (Phase 2) can configure a different attack_range than
         # the engine default — read the live value off the snapshot so the
