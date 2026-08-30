@@ -138,8 +138,8 @@ class ArenaRenderer:
         self._draw_explosions(dest, t)
 
         if font_small:
-            self._draw_tag(dest, font_small, pos_a, a, "alpha")
-            self._draw_tag(dest, font_small, pos_b, b, "beta")
+            self._draw_status(dest, font_small, pos_a, a, "alpha")
+            self._draw_status(dest, font_small, pos_b, b, "beta")
 
     def _crosshair(self, dest, pos, color):
         x, y = pos
@@ -183,9 +183,43 @@ class ArenaRenderer:
             alive.append(e)
         self._explosions = alive
 
-    def _draw_tag(self, dest, font, pos, ship, team_key):
-        color = (159, 180, 255) if team_key == "alpha" else (240, 185, 138)
-        label = f"{ship['name']}  HP {ship['hp_pct']*100:.0f}%"
-        surf = font.render(label, True, color)
+    # Fixed by requirement: Health is always green, Energy is always blue —
+    # no tiered/warning colors. Distinctness between the two bars (not
+    # ship condition) is what the color is communicating here.
+    HP_BAR_COLOR = (46, 204, 113)
+    ENERGY_BAR_COLOR = (52, 148, 235)
+
+    def _draw_bar(self, dest, font, cx, top_y, pct, fill_color, label_char):
+        """One labeled status bar (HP or Energy), centered on cx, growing
+        left-to-right from empty (0%) to full (100%) — always drawn at a
+        fixed track size so a participant can compare HP vs Energy at a
+        glance, not just read a number. Sized to be prominent, not a
+        small/subtle readout."""
+        pct = max(0.0, min(1.0, pct))
+        bar_w, bar_h = 64, 9
+        track = pygame.Rect(0, 0, bar_w, bar_h)
+        track.midtop = (cx, top_y)
+        pygame.draw.rect(dest, (10, 14, 20), track, border_radius=3)
+        if pct > 0:
+            fill = pygame.Rect(track.left, track.top, max(3, int(bar_w * pct)), bar_h)
+            pygame.draw.rect(dest, fill_color, fill, border_radius=3)
+        pygame.draw.rect(dest, (232, 232, 234, 140), track, width=1, border_radius=3)
+
+        label_surf = font.render(f"{label_char} {int(round(pct * 100))}%", True, (232, 232, 234))
+        dest.blit(label_surf, (track.right + 6, track.top - 2))
+
+    def _draw_status(self, dest, font, pos, ship, team_key):
+        """Ship name plus distinct HP and Energy bars, always visible
+        above the ship — this is the participant's primary at-a-glance
+        readout of their ship's condition during a live battle."""
+        name_color = (159, 180, 255) if team_key == "alpha" else (240, 185, 138)
         x, y = pos
-        dest.blit(surf, (x - surf.get_width() / 2, y - 32))
+        name_surf = font.render(ship["name"], True, name_color)
+        name_y = y - 62
+        dest.blit(name_surf, (x - name_surf.get_width() / 2, name_y))
+
+        hp_y = name_y + name_surf.get_height() + 4
+        self._draw_bar(dest, font, x, hp_y, ship["hp_pct"], self.HP_BAR_COLOR, "HP")
+
+        energy_y = hp_y + 12
+        self._draw_bar(dest, font, x, energy_y, ship.get("energy_pct", 0.0), self.ENERGY_BAR_COLOR, "EN")

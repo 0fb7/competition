@@ -1,6 +1,6 @@
 import customtkinter as ctk
 
-from . import theme, live_state, status_style
+from . import theme, live_state, status_style, branding
 from .localization import t
 
 
@@ -18,10 +18,13 @@ class TopBar(ctk.CTkFrame):
             w.destroy()
 
         pad = 16
+        logo_image = branding.load_logo_ctkimage(height=28)
+        if logo_image is not None:
+            ctk.CTkLabel(self, image=logo_image, text="").pack(side="left", padx=(pad, 8), pady=10)
         self.name_label = ctk.CTkLabel(
             self, text=t("app_name"), font=theme.font(15, "bold"), text_color=self.tokens.text,
         )
-        self.name_label.pack(side="left", padx=(pad, 6), pady=10)
+        self.name_label.pack(side="left", padx=(0 if logo_image is not None else pad, 6), pady=10)
 
         self.comp_label = ctk.CTkLabel(
             self, text=t("competition"), font=theme.font(12), text_color=self.tokens.text_dim,

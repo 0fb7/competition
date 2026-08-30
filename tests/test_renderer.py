@@ -79,12 +79,32 @@ def test_draw_ignores_event_from_unrecognized_team_defensively():
     renderer.draw(surface, _snapshot("Team A", "Team B", [stray_evt]))
 
 
+def test_draw_renders_hp_and_energy_bars_without_error():
+    """Practice Console request: distinct HP and Energy bars must render
+    above each ship whenever a font is supplied — this is the code path
+    that was previously untested (existing tests never passed font_small,
+    so the old/new per-ship label code never actually ran)."""
+    pygame.font.init()
+    font = pygame.font.SysFont("Segoe UI", 12)
+    renderer = ArenaRenderer(pygame.Rect(0, 0, 400, 300))
+    surface = pygame.Surface((400, 300))
+
+    snap = _snapshot("Team A", "Team B", [])
+    snap["ship_a"]["hp_pct"] = 0.8
+    snap["ship_a"]["energy_pct"] = 0.4
+    snap["ship_b"]["hp_pct"] = 0.15  # exercises the "critical" HP bar color branch
+    snap["ship_b"]["energy_pct"] = 0.0  # exercises the empty-bar branch
+
+    renderer.draw(surface, snap, font_small=font)
+
+
 if __name__ == "__main__":
     pygame.init()
     tests = [
         test_draw_survives_custom_team_names_through_attack_and_damage,
         test_draw_still_works_with_default_team_names,
         test_draw_ignores_event_from_unrecognized_team_defensively,
+        test_draw_renders_hp_and_energy_bars_without_error,
     ]
     for fn in tests:
         print(f"{fn.__name__} ...")

@@ -42,7 +42,7 @@ from results.result_repository import ResultRepository
 from results.result_service import ResultService
 from engine import events as ev
 
-from . import theme, localization
+from . import theme, localization, branding
 from .localization import t
 from .topbar import TopBar
 from .sidebar import Sidebar
@@ -79,7 +79,8 @@ class App(ctk.CTk):
         ctk.set_widget_scaling(1.0)
 
         self.tokens = theme.Tokens("dark")
-        self.title("Code Battleship")
+        self.title("code Battleship - Programming Club")
+        branding.set_window_icon(self)
         self.geometry("1500x900")
         self.minsize(1180, 720)
         self.configure(fg_color=self.tokens.bg)
