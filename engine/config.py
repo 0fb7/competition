@@ -14,6 +14,7 @@ changes unless a Challenge explicitly configures different values.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 # Arena size is not a per-Challenge "rule" (movement/attack/range/damage/
@@ -21,6 +22,47 @@ from dataclasses import dataclass, field
 # constant, unconfigured, exactly as before.
 ARENA_WIDTH = 40.0
 ARENA_HEIGHT = 22.5
+
+# Canonical world-space ship footprint, derived from the renderer's fixed
+# hull sprite (sim/ship_renderer.py: HULL_LEN=132px at scale=1.0) via a
+# reference scale close to the admin Battle Arena's default panel size —
+# not an arbitrary number. Used for two things that must agree with each
+# other: (1) engine/ship.py's minimum-separation check, so ships can
+# never visually overlap, and (2) sim/renderer.py's per-panel scale
+# factor, so a ship occupies the same proportion of the arena whether
+# it's drawn in the admin's Battle Arena or the Practice Console's
+# smaller embed. Not part of BattleConfig — this is a fixed physical/
+# visual constant, not something a Challenge's rules configure.
+SHIP_LENGTH_WORLD = 6.0
+
+# Minimum center-to-center distance the two ships are allowed to close
+# to. Roughly one hull-length, which leaves a real (if small) visible
+# gap between hulls rather than just touching bow-to-bow. Capped at
+# runtime against a fraction of the active attack_range (see
+# engine/ship.py::enforce_minimum_separation) so an unusually small
+# Challenge-configured attack_range can never make this distance
+# unreachable and block combat.
+SHIP_MIN_SEPARATION = 6.0
+
+# Half of the ship's world-space footprint along its longer axis (length)
+# and shorter axis (width) — derived from the same hull proportions
+# sim/ship_renderer.py's sprite uses (132:40 length:width) applied to
+# SHIP_LENGTH_WORLD. Kept as a plain constant here rather than importing
+# from sim/ship_renderer.py, so engine/ never depends on the rendering
+# package — the engine must stay headless-safe (submissions/test_runner.py
+# and every engine test run it with no pygame/display at all).
+_HULL_LENGTH_PX = 132.0
+_HULL_WIDTH_PX = 40.0
+SHIP_HALF_LENGTH_WORLD = SHIP_LENGTH_WORLD / 2
+SHIP_HALF_WIDTH_WORLD = SHIP_LENGTH_WORLD * (_HULL_WIDTH_PX / _HULL_LENGTH_PX) / 2
+
+# Conservative single margin — the half-diagonal of the hull's real
+# footprint — that keeps the FULL hull inside the arena bounds at any
+# heading/rotation, not just when facing an axis. Used to keep a ship's
+# center far enough from every edge that its entire visible body always
+# stays inside the frame, never partially clipped, regardless of which
+# Battle Arena panel is drawing it.
+SHIP_BOUNDARY_MARGIN = math.hypot(SHIP_HALF_LENGTH_WORLD, SHIP_HALF_WIDTH_WORLD)
 
 ALL_API_FUNCTIONS = ("move_toward", "hold_position", "attack", "find_nearest", "distance_to", "log")
 
@@ -40,6 +82,15 @@ class BattleConfig:
     attack_cooldown: float = 1.2
     attack_energy_cost: float = 18.0
     energy_regen_rate: float = 8.0
+    # Energy drained per world-unit of ACTUAL movement (engine/ship.py's
+    # Ship.move_toward() reuses its own already-computed `step` distance
+    # — no duplicate distance math). Defaults to 0.0 so every existing
+    # Challenge/test is byte-for-byte unaffected unless it explicitly
+    # opts in. Movement itself is NEVER blocked by low/zero energy —
+    # this only drains the pool (floored at 0), it never gates whether
+    # move_toward() can run, unlike attack_energy_cost which does gate
+    # can_attack().
+    movement_energy_cost: float = 0.0
     # Effectively unlimited by default (arena diagonal is ~45.9) so a
     # Challenge that doesn't set this gets today's unlimited-detection
     # find_nearest() behavior, unchanged.
@@ -75,6 +126,8 @@ class BattleConfig:
             raise ValueError("attack_energy_cost must be >= 0")
         if self.energy_regen_rate < 0:
             raise ValueError("energy_regen_rate must be >= 0")
+        if self.movement_energy_cost < 0:
+            raise ValueError("movement_energy_cost must be >= 0")
         if self.sensor_range <= 0:
             raise ValueError("sensor_range must be > 0")
         if self.battle_duration is not None and self.battle_duration <= 0:

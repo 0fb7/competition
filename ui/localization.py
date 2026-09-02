@@ -162,6 +162,7 @@ STRINGS = {
     "rule_energy_pool": {"en": "Energy Pool", "ar": "مخزون الطاقة"},
     "rule_sensor_range": {"en": "Sensor Range", "ar": "مدى الاستشعار"},
     "rule_battle_duration": {"en": "Battle Duration (s)", "ar": "مدة المعركة (ث)"},
+    "rule_movement_energy_cost": {"en": "Movement Energy Cost", "ar": "تكلفة الطاقة للحركة"},
 
     "no_challenges_title": {"en": "No challenges yet.", "ar": "لا توجد تحديات بعد."},
     "no_challenges_body": {

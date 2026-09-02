@@ -11,13 +11,17 @@ on the tick it happens.
 """
 
 import math
+import random
 import time
 
 import pygame
 
 from . import ship_renderer as sr
 from engine import events as ev
-from engine.ship import ARENA_WIDTH, ARENA_HEIGHT, ATTACK_RANGE as _DEFAULT_ATTACK_RANGE
+from engine.ship import (
+    ARENA_WIDTH, ARENA_HEIGHT, SHIP_LENGTH_WORLD,
+    ATTACK_RANGE as _DEFAULT_ATTACK_RANGE,
+)
 
 BG_TOP = (19, 27, 39)
 BG_BOTTOM = (11, 16, 23)
@@ -27,6 +31,7 @@ BORDER = (232, 232, 234, 60)
 
 PROJECTILE_DURATION = 0.22
 EXPLOSION_DURATION = 0.55
+HIT_FLASH_FRACTION = 0.25  # first quarter of EXPLOSION_DURATION is the bright impact flash
 
 TEAM_KEY = {"Team Alpha": "alpha", "Team Beta": "beta"}
 
@@ -36,8 +41,16 @@ class ArenaRenderer:
         self.rect = rect
         self._bg_cache = None
         self._projectiles = []   # list of dict(start, from, to, team)
-        self._explosions = []    # list of dict(start, pos, team)
+        self._explosions = []    # list of dict(start, pos, team, spark_seed)
         self._seen_event_ids = set()
+        # A self-maintained clock that only advances while the engine
+        # reports running=True — used for every animation timestamp
+        # below instead of raw wall-clock time, so a Pause genuinely
+        # freezes in-flight projectiles/hit-effects/ship idle-animation
+        # instead of them continuing to play out in real time while the
+        # battle itself is frozen (spec: consistent with game state).
+        self._last_wall = None
+        self._sim_clock = 0.0
 
     def resize(self, rect: pygame.Rect):
         self.rect = rect
@@ -47,6 +60,35 @@ class ArenaRenderer:
         sx = self.rect.x + (x / ARENA_WIDTH) * self.rect.width
         sy = self.rect.y + (y / ARENA_HEIGHT) * self.rect.height
         return sx, sy
+
+    def ship_scale(self) -> float:
+        """Converts the canonical world-unit ship length into a hull
+        rotozoom scale for THIS panel's actual pixel size, so a ship
+        occupies the same proportion of the arena regardless of which
+        Battle Arena panel is drawing it — the admin's and the Practice
+        Console's embeds are different pixel sizes for the same
+        world-unit arena, and the hull sprite used to always be drawn at
+        a fixed 132px regardless, which made it look proportionally
+        larger in the smaller panel. Also used to scale every other
+        visual size (status bars, projectiles, hit effects) so the whole
+        visual language stays consistent between panels, not just the
+        hull."""
+        px_per_unit = min(self.rect.width / ARENA_WIDTH, self.rect.height / ARENA_HEIGHT)
+        return (SHIP_LENGTH_WORLD * px_per_unit) / sr.HULL_LEN
+
+    def _advance_clock(self, running: bool, now: float | None = None) -> float:
+        """Advances the animation clock by real elapsed time only when
+        `running` is True; returns the clock's current value. `now` is
+        injectable for deterministic tests — defaults to the real clock."""
+        if now is None:
+            now = time.perf_counter()
+        if self._last_wall is None:
+            self._last_wall = now
+        dt = max(0.0, now - self._last_wall)
+        self._last_wall = now
+        if running:
+            self._sim_clock += dt
+        return self._sim_clock
 
     def _build_background(self):
         surf = pygame.Surface(self.rect.size)
@@ -78,7 +120,7 @@ class ArenaRenderer:
 
         self._bg_cache = surf
 
-    def _ingest_events(self, new_events, ship_a_pos, ship_b_pos, team_a_name, team_b_name):
+    def _ingest_events(self, new_events, ship_a_pos, ship_b_pos, team_a_name, team_b_name, now):
         # Real competition matches use whatever names the admin gave the
         # teams (e.g. "Team A"/"Team B"), not always the default "Team
         # Alpha"/"Team Beta" — this must key off the actual snapshot names,
@@ -86,8 +128,14 @@ class ArenaRenderer:
         # KeyError and (since draw() is called from battle_panel.py's
         # try/except-and-stop-rendering loop) silently kills the arena's
         # render loop the instant the first real attack/damage event fires.
+        #
+        # `now` is the same self._sim_clock value _draw_projectiles()/
+        # _draw_explosions() measure progress against — NOT raw
+        # time.perf_counter(). Stamping with a different clock than the
+        # one progress is later measured against would make every
+        # animation's duration wrong the moment the two clocks diverge
+        # (which happens the instant a pause occurs).
         pos_by_team = {team_a_name: ship_a_pos, team_b_name: ship_b_pos}
-        now = time.perf_counter()
         for evt in new_events:
             if evt.id in self._seen_event_ids:
                 continue
@@ -103,6 +151,7 @@ class ArenaRenderer:
             elif evt.kind == ev.DAMAGE:
                 self._explosions.append({
                     "start": now, "pos": pos_by_team[opponent_team], "team": evt.team,
+                    "spark_seed": random.uniform(0, 2 * math.pi),
                 })
 
     def draw(self, dest: pygame.Surface, snapshot: dict, font_small=None):
@@ -110,11 +159,14 @@ class ArenaRenderer:
             self._build_background()
         dest.blit(self._bg_cache, self.rect.topleft)
 
+        scale = self.ship_scale()
+        t = self._advance_clock(bool(snapshot.get("running")))
+
         a, b = snapshot["ship_a"], snapshot["ship_b"]
         pos_a = self.world_to_screen(a["x"], a["y"])
         pos_b = self.world_to_screen(b["x"], b["y"])
 
-        self._ingest_events(snapshot.get("new_events", []), pos_a, pos_b, a["team"], b["team"])
+        self._ingest_events(snapshot.get("new_events", []), pos_a, pos_b, a["team"], b["team"], t)
 
         # Challenges (Phase 2) can configure a different attack_range than
         # the engine default — read the live value off the snapshot so the
@@ -125,32 +177,40 @@ class ArenaRenderer:
         in_range = dist <= attack_range and a["alive"] and b["alive"]
         if in_range:
             pygame.draw.line(dest, (232, 232, 234, 50), pos_a, pos_b, 1)
-            self._crosshair(dest, pos_b, (224, 101, 74))
+            self._crosshair(dest, pos_b, (224, 101, 74), scale)
 
-        t = time.perf_counter()
         aim_a = math.atan2(pos_b[1] - pos_a[1], pos_b[0] - pos_a[0]) if in_range else None
         aim_b = math.atan2(pos_a[1] - pos_b[1], pos_a[0] - pos_b[0]) if in_range else None
 
-        sr.draw_ship(dest, *pos_a, a["heading"], "alpha", a["hp_pct"], t, aim_angle=aim_a)
-        sr.draw_ship(dest, *pos_b, b["heading"], "beta", b["hp_pct"], t, aim_angle=aim_b)
+        sr.draw_ship(dest, *pos_a, a["heading"], "alpha", a["hp_pct"], t, aim_angle=aim_a, scale=scale)
+        sr.draw_ship(dest, *pos_b, b["heading"], "beta", b["hp_pct"], t, aim_angle=aim_b, scale=scale)
 
-        self._draw_projectiles(dest, t)
-        self._draw_explosions(dest, t)
+        self._draw_projectiles(dest, t, scale)
+        self._draw_explosions(dest, t, scale)
 
         if font_small:
-            self._draw_status(dest, font_small, pos_a, a, "alpha")
-            self._draw_status(dest, font_small, pos_b, b, "beta")
+            self._draw_status(dest, font_small, pos_a, a, "alpha", scale)
+            self._draw_status(dest, font_small, pos_b, b, "beta", scale)
 
-    def _crosshair(self, dest, pos, color):
+    def _crosshair(self, dest, pos, color, scale):
         x, y = pos
-        r = 11
+        r = 11 * scale
         pygame.draw.line(dest, color, (x - r, y), (x - r * 0.35, y), 1)
         pygame.draw.line(dest, color, (x + r * 0.35, y), (x + r, y), 1)
         pygame.draw.line(dest, color, (x, y - r), (x, y - r * 0.35), 1)
         pygame.draw.line(dest, color, (x, y + r * 0.35), (x, y + r), 1)
-        pygame.draw.circle(dest, color, (int(x), int(y)), r, width=1)
+        pygame.draw.circle(dest, color, (int(x), int(y)), max(1, int(r)), width=1)
 
-    def _draw_projectiles(self, dest, now):
+    def _draw_projectiles(self, dest, now, scale):
+        """Each bolt: a short fading dot-trail behind its current
+        position (a cheap, dependency-free 'motion trail' using the same
+        small-SRCALPHA-surface-then-blit technique the rest of this file
+        already uses, not a new particle system) plus a small glowing
+        core — sized to `scale` so it stays proportionate to the ship
+        it's fired from/at, whichever panel is drawing it. Position is
+        still a straight, already-smoothly-interpolated lerp from the
+        real fire-time positions (spec: clear trajectory, never a
+        teleport) — only the look of the bolt itself changed here."""
         alive = []
         for p in self._projectiles:
             progress = (now - p["start"]) / PROJECTILE_DURATION
@@ -160,26 +220,69 @@ class ArenaRenderer:
             tx, ty = p["to"]
             x = fx + (tx - fx) * progress
             y = fy + (ty - fy) * progress
-            glow = pygame.Surface((16, 16), pygame.SRCALPHA)
-            pygame.draw.circle(glow, (255, 255, 255, 220), (8, 8), 5)
-            pygame.draw.circle(glow, (52, 148, 235, 90), (8, 8), 8)
-            dest.blit(glow, (x - 8, y - 8))
+
+            dx, dy = tx - fx, ty - fy
+            seg_len = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / seg_len, dy / seg_len
+
+            for i, back in enumerate((8, 16, 24)):
+                bx, by = x - ux * back * scale, y - uy * back * scale
+                r = max(1, int((4 - i) * scale))
+                alpha = max(0, 90 - i * 30)
+                dot = pygame.Surface((r * 2 + 2, r * 2 + 2), pygame.SRCALPHA)
+                pygame.draw.circle(dot, (52, 148, 235, alpha), (r + 1, r + 1), r)
+                dest.blit(dot, (bx - r - 1, by - r - 1))
+
+            core_r = max(2, int(3.5 * scale))
+            glow_r = max(3, int(6 * scale))
+            glow = pygame.Surface((glow_r * 2 + 4, glow_r * 2 + 4), pygame.SRCALPHA)
+            c = glow.get_width() // 2
+            pygame.draw.circle(glow, (52, 148, 235, 110), (c, c), glow_r)
+            pygame.draw.circle(glow, (255, 255, 255, 235), (c, c), core_r)
+            dest.blit(glow, (x - c, y - c))
             alive.append(p)
         self._projectiles = alive
 
-    def _draw_explosions(self, dest, now):
+    def _draw_explosions(self, dest, now, scale):
+        """The expanding/fading burst that already existed, plus (only in
+        the first HIT_FLASH_FRACTION of its life) a brief bright flash
+        and a handful of radiating spark lines — reads as a real impact
+        moment, not just a growing blob. Brief, proportionate to the ship
+        (scaled), and cleaned up the same way the burst already was: an
+        entry is simply dropped from the rebuilt `alive` list once its
+        progress passes 1.0, every frame — no separate timer/thread, no
+        leak."""
         alive = []
         for e in self._explosions:
             progress = (now - e["start"]) / EXPLOSION_DURATION
             if progress >= 1.0:
                 continue
             x, y = e["pos"]
-            radius = 6 + progress * 20
+            radius = (6 + progress * 20) * scale
             alpha = int(200 * (1 - progress))
-            burst = pygame.Surface((60, 60), pygame.SRCALPHA)
-            pygame.draw.circle(burst, (255, 200, 120, alpha), (30, 30), int(radius))
-            pygame.draw.circle(burst, (226, 138, 61, alpha), (30, 30), int(radius * 0.6))
-            dest.blit(burst, (x - 30, y - 30))
+            burst_size = int(radius * 2 + 20)
+            burst = pygame.Surface((burst_size, burst_size), pygame.SRCALPHA)
+            c = burst_size // 2
+            pygame.draw.circle(burst, (255, 200, 120, alpha), (c, c), int(radius))
+            pygame.draw.circle(burst, (226, 138, 61, alpha), (c, c), int(radius * 0.6))
+            dest.blit(burst, (x - c, y - c))
+
+            if progress < HIT_FLASH_FRACTION:
+                flash_progress = progress / HIT_FLASH_FRACTION
+                flash_alpha = int(255 * (1 - flash_progress))
+                flash_r = max(2, int(10 * scale))
+                flash = pygame.Surface((flash_r * 2 + 4, flash_r * 2 + 4), pygame.SRCALPHA)
+                fc = flash.get_width() // 2
+                pygame.draw.circle(flash, (255, 255, 255, flash_alpha), (fc, fc), flash_r)
+                dest.blit(flash, (x - fc, y - fc))
+
+                spark_len = (6 + flash_progress * 40) * scale
+                spark_seed = e.get("spark_seed", 0.0)
+                for i in range(5):
+                    ang = spark_seed + i * (2 * math.pi / 5)
+                    sx = x + math.cos(ang) * spark_len
+                    sy = y + math.sin(ang) * spark_len
+                    pygame.draw.line(dest, (255, 210, 140), (x, y), (sx, sy), max(1, int(2 * scale)))
             alive.append(e)
         self._explosions = alive
 
@@ -189,14 +292,14 @@ class ArenaRenderer:
     HP_BAR_COLOR = (46, 204, 113)
     ENERGY_BAR_COLOR = (52, 148, 235)
 
-    def _draw_bar(self, dest, font, cx, top_y, pct, fill_color, label_char):
+    def _draw_bar(self, dest, font, cx, top_y, pct, fill_color, label_char, scale):
         """One labeled status bar (HP or Energy), centered on cx, growing
-        left-to-right from empty (0%) to full (100%) — always drawn at a
-        fixed track size so a participant can compare HP vs Energy at a
-        glance, not just read a number. Sized to be prominent, not a
-        small/subtle readout."""
+        left-to-right from empty (0%) to full (100%) — sized from `scale`
+        so it stays consistent with the ship/panel it belongs to, with a
+        floor so it never becomes illegibly small on the smaller
+        Practice Console panel."""
         pct = max(0.0, min(1.0, pct))
-        bar_w, bar_h = 64, 9
+        bar_w, bar_h = max(40, int(64 * scale)), max(6, int(9 * scale))
         track = pygame.Rect(0, 0, bar_w, bar_h)
         track.midtop = (cx, top_y)
         pygame.draw.rect(dest, (10, 14, 20), track, border_radius=3)
@@ -208,18 +311,18 @@ class ArenaRenderer:
         label_surf = font.render(f"{label_char} {int(round(pct * 100))}%", True, (232, 232, 234))
         dest.blit(label_surf, (track.right + 6, track.top - 2))
 
-    def _draw_status(self, dest, font, pos, ship, team_key):
+    def _draw_status(self, dest, font, pos, ship, team_key, scale):
         """Ship name plus distinct HP and Energy bars, always visible
         above the ship — this is the participant's primary at-a-glance
         readout of their ship's condition during a live battle."""
         name_color = (159, 180, 255) if team_key == "alpha" else (240, 185, 138)
         x, y = pos
         name_surf = font.render(ship["name"], True, name_color)
-        name_y = y - 62
+        name_y = y - 62 * scale
         dest.blit(name_surf, (x - name_surf.get_width() / 2, name_y))
 
         hp_y = name_y + name_surf.get_height() + 4
-        self._draw_bar(dest, font, x, hp_y, ship["hp_pct"], self.HP_BAR_COLOR, "HP")
+        self._draw_bar(dest, font, x, hp_y, ship["hp_pct"], self.HP_BAR_COLOR, "HP", scale)
 
-        energy_y = hp_y + 12
-        self._draw_bar(dest, font, x, energy_y, ship.get("energy_pct", 0.0), self.ENERGY_BAR_COLOR, "EN")
+        energy_y = hp_y + max(9, int(12 * scale))
+        self._draw_bar(dest, font, x, energy_y, ship.get("energy_pct", 0.0), self.ENERGY_BAR_COLOR, "EN", scale)

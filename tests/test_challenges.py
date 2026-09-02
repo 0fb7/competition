@@ -16,7 +16,7 @@ from challenges.challenge import Rules, ValidationError, STATUS_ACTIVE, STATUS_R
 from challenges.challenge_repository import ChallengeRepository
 from challenges.challenge_service import ChallengeService, DEFAULT_CHALLENGE_ID
 from engine.battle import BattleEngine
-from engine.config import WIN_DESTROY_ENEMY, WIN_TIME_LIMIT_DRAW
+from engine.config import BattleConfig, WIN_DESTROY_ENEMY, WIN_TIME_LIMIT_DRAW
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALPHA_PATH = os.path.join(ROOT, "teams", "team_alpha.py")
@@ -227,29 +227,35 @@ def test_active_challenge_cannot_have_unsafe_rule_changes():
     shutil.rmtree(tmp)
 
 
-def test_default_challenge_preserves_existing_battle_engine_behavior():
+def test_default_challenge_matches_legacy_defaults_except_movement_energy_cost():
+    """Was test_default_challenge_preserves_existing_battle_engine_behavior
+    (full battle-outcome equivalence to no-config legacy). That premise is
+    now intentionally false: the seeded "Tactical Battleship" challenge
+    was deliberately given movement_energy_cost=0.5 (the Energy-as-a-
+    resource extension), so its battles no longer play out identically to
+    legacy defaults — that's the whole point of the change, not a
+    regression. Rewritten to assert the actual new invariant precisely:
+    every OTHER BattleConfig field the seeded challenge produces still
+    matches legacy defaults exactly, and movement_energy_cost is exactly
+    0.5 — a config-field comparison, not a battle-outcome one, since an
+    emergent-outcome comparison is no longer a meaningful way to verify
+    "nothing else changed" once one rule is deliberately different."""
     tmp, repo, svc = _fresh_env()
     svc.ensure_default_challenge()
     default = svc.get_challenge(DEFAULT_CHALLENGE_ID)
-    with open(ALPHA_PATH, encoding="utf-8") as f:
-        alpha_code = f.read()
-    with open(BETA_PATH, encoding="utf-8") as f:
-        beta_code = f.read()
 
-    baseline = BattleEngine(alpha_code, beta_code)
-    configured = BattleEngine(alpha_code, beta_code, config=default.to_battle_config())
-    baseline.start()
-    configured.start()
-    dt = 1 / 30
-    for _ in range(30 * 60):
-        if not baseline.winner:
-            baseline.step(dt)
-        if not configured.winner:
-            configured.step(dt)
-        if baseline.winner and configured.winner:
-            break
-    assert baseline.winner == configured.winner
-    assert baseline.tick_count == configured.tick_count
+    legacy = BattleConfig()
+    configured = default.to_battle_config()
+
+    assert configured.movement_energy_cost == 0.5
+    for field_name in (
+        "max_hp", "max_energy", "movement_speed", "attack_enabled", "attack_range",
+        "attack_damage", "attack_cooldown", "attack_energy_cost", "energy_regen_rate",
+        "sensor_range", "battle_duration", "code_execution_timeout",
+    ):
+        assert getattr(configured, field_name) == getattr(legacy, field_name), (
+            f"{field_name} unexpectedly diverged from legacy defaults"
+        )
     shutil.rmtree(tmp)
 
 
@@ -354,7 +360,7 @@ if __name__ == "__main__":
         test_challenge_status_transitions,
         test_active_challenge_cannot_be_deleted,
         test_active_challenge_cannot_have_unsafe_rule_changes,
-        test_default_challenge_preserves_existing_battle_engine_behavior,
+        test_default_challenge_matches_legacy_defaults_except_movement_energy_cost,
         test_challenge_rules_reach_battle_engine,
         test_existing_team_management_tests_still_pass,
         test_existing_engine_tests_still_pass,

@@ -44,7 +44,11 @@ class ChallengeService:
             ),
             objective="Destroy the enemy ship before your own ship is destroyed.",
             difficulty="LEVEL_2",
-            rules=Rules(),  # engine defaults — identical to pre-Phase-2 behavior
+            # engine defaults, except movement_energy_cost=0.5: the
+            # Energy-as-a-resource extension applied to the flagship
+            # challenge — every other Challenge (and Rules() itself)
+            # still defaults to 0.0 (movement free), unaffected.
+            rules=Rules(movement_energy_cost=0.5),
             win_condition=WIN_DESTROY_ENEMY,
             allowed_api=list(ALL_API_FUNCTIONS),
             status=STATUS_ACTIVE,

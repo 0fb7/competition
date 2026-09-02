@@ -5,12 +5,13 @@ description of the mechanics that already exist in engine/ship.py — see
 Rules below), which team API functions are usable, the win condition,
 and metadata (name/description/objective/difficulty/status).
 
-Rules deliberately expose exactly the 8 mechanics named in the brief
+Rules deliberately expose only the mechanics named in the brief
 (movement, attack, range, damage, cooldown, energy, sensor_range,
-battle_duration) — not every engine/config.py field. max_hp,
-attack_energy_cost and energy_regen_rate stay at their engine defaults,
-not exposed as Challenge rules, to avoid overbuilding the model with
-knobs nobody asked for.
+battle_duration) plus movement_energy_cost (the one Energy-as-a-
+resource extension added afterward) — not every engine/config.py field.
+max_hp, attack_energy_cost and energy_regen_rate stay at their engine
+defaults, not exposed as Challenge rules, to avoid overbuilding the
+model with knobs nobody asked for.
 
 Rules.to_battle_config() is the ONLY place a Challenge turns into
 something the engine understands (engine.config.BattleConfig), and it
@@ -58,6 +59,10 @@ class Rules:
     energy_pool: float = 100.0
     sensor_range: float = 100.0
     battle_duration: float | None = None  # seconds; None = no time limit
+    # Energy drained per world-unit of actual movement. 0.0 = today's
+    # legacy behavior (movement is free) — see engine/config.py's
+    # BattleConfig.movement_energy_cost for the full explanation.
+    movement_energy_cost: float = 0.0
 
     def to_battle_config(self, win_condition: str, allowed_api: list[str] | None) -> BattleConfig:
         return BattleConfig(
@@ -69,6 +74,7 @@ class Rules:
             max_energy=self.energy_pool,
             sensor_range=self.sensor_range,
             battle_duration=self.battle_duration,
+            movement_energy_cost=self.movement_energy_cost,
             win_condition=win_condition,
             allowed_api=list(allowed_api) if allowed_api is not None else None,
         )
@@ -93,6 +99,7 @@ class Rules:
             energy_pool=d.get("energy_pool", 100.0),
             sensor_range=d.get("sensor_range", 100.0),
             battle_duration=d.get("battle_duration"),
+            movement_energy_cost=d.get("movement_energy_cost", 0.0),
         )
 
 

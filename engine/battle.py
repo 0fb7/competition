@@ -6,7 +6,7 @@ import time
 from .api import build_api
 from .config import BattleConfig
 from .sandbox import compile_team_module, run_decide
-from .ship import Ship
+from .ship import Ship, enforce_minimum_separation
 from . import events as ev
 from .events import EventBus
 from .worker import DecideWorker, STATUS_OK, STATUS_TIMEOUT
@@ -246,6 +246,12 @@ class BattleEngine:
                 tx, ty = pending["move_target"]
                 ship.move_toward(tx, ty, dt)
                 ship.last_action = "move"
+
+        # Real, physical constraint on the actual ship coordinates (not a
+        # rendering trick) — must run AFTER movement and BEFORE the
+        # attack-range check below, so can_attack()'s distance_to() sees
+        # the same corrected positions the Battle Arena will draw.
+        enforce_minimum_separation(self.ship_a, self.ship_b, self.config)
 
         for ship, opponent, pending in (
             (self.ship_a, self.ship_b, pending_a),

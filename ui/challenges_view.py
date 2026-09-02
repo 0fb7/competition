@@ -46,6 +46,7 @@ RULE_FIELDS = [
     ("energy_pool", "rule_energy_pool", "number"),
     ("sensor_range", "rule_sensor_range", "number"),
     ("battle_duration", "rule_battle_duration", "number_optional"),
+    ("movement_energy_cost", "rule_movement_energy_cost", "number"),
 ]
 
 

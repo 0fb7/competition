@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pygame
 
 from engine import events as ev
-from sim.renderer import ArenaRenderer
+from sim.renderer import ArenaRenderer, PROJECTILE_DURATION, EXPLOSION_DURATION
 
 
 def _ship(team: str, name: str, x: float, y: float) -> dict:
@@ -98,6 +98,98 @@ def test_draw_renders_hp_and_energy_bars_without_error():
     renderer.draw(surface, snap, font_small=font)
 
 
+def test_advance_clock_freezes_while_not_running():
+    """Battle Arena visualization request: pausing (engine reports
+    running=False) must freeze in-flight animation progress, not let it
+    keep advancing in real time — otherwise a projectile/hit-effect
+    visible at the moment of a Pause would simply finish playing out
+    during the pause, inconsistent with the frozen battle state.
+    Deterministic — uses the injectable `now` rather than real sleeps."""
+    renderer = ArenaRenderer(pygame.Rect(0, 0, 400, 300))
+
+    t0 = renderer._advance_clock(running=True, now=100.0)
+    assert t0 == 0.0  # first call just establishes the baseline, no delta yet
+
+    t1 = renderer._advance_clock(running=True, now=100.5)
+    assert abs(t1 - 0.5) < 1e-9  # running: advanced by the real delta
+
+    # "pause" — real wall-clock keeps moving, but running=False
+    t2 = renderer._advance_clock(running=False, now=101.5)
+    assert t2 == t1, "animation clock must not advance while paused"
+
+    t3 = renderer._advance_clock(running=False, now=105.0)
+    assert t3 == t1, "animation clock must stay frozen for as long as paused"
+
+    # resume — clock continues from where it left off, not from 0 and not
+    # jumping by the real time that passed while paused
+    t4 = renderer._advance_clock(running=True, now=105.2)
+    assert abs(t4 - (t1 + 0.2)) < 1e-9
+
+
+def test_ship_scale_matches_between_admin_and_practice_panel_sizes():
+    """Requirement: the visual experience must be almost identical
+    between the admin's Battle Arena panel (820x560px, ui/app.py's
+    BattlePanel default) and the Practice Console's panel (440x320px,
+    practice_console.py) — both represent the same 40x22.5 world-unit
+    arena at different pixel sizes. Before this fix the hull was always
+    drawn at a fixed 132px regardless of panel size, so a ship's size
+    relative to the arena differed between the two. ship_scale() must
+    convert each panel's own pixel size back to the same canonical
+    world-unit ship length."""
+    from sim import ship_renderer as sr
+    from engine.config import SHIP_LENGTH_WORLD, ARENA_WIDTH, ARENA_HEIGHT
+
+    admin_renderer = ArenaRenderer(pygame.Rect(0, 0, 820, 560))
+    practice_renderer = ArenaRenderer(pygame.Rect(0, 0, 440, 320))
+
+    admin_scale = admin_renderer.ship_scale()
+    practice_scale = practice_renderer.ship_scale()
+
+    def _effective_world_length(rect, scale):
+        px_per_unit = min(rect.width / ARENA_WIDTH, rect.height / ARENA_HEIGHT)
+        return (scale * sr.HULL_LEN) / px_per_unit
+
+    admin_world_len = _effective_world_length(admin_renderer.rect, admin_scale)
+    practice_world_len = _effective_world_length(practice_renderer.rect, practice_scale)
+
+    assert abs(admin_world_len - SHIP_LENGTH_WORLD) < 1e-6
+    assert abs(practice_world_len - SHIP_LENGTH_WORLD) < 1e-6
+    assert abs(admin_world_len - practice_world_len) < 1e-6, (
+        "a ship must occupy the same proportion of the arena in both panels"
+    )
+    # the two panels ARE different pixel sizes, so the raw scale factors
+    # themselves should differ (proves this isn't trivially always 1.0)
+    assert abs(admin_scale - practice_scale) > 1e-3
+
+
+def test_projectiles_and_explosions_are_cleaned_up_over_time():
+    """Requirement: effects must not accumulate forever — once an
+    in-flight projectile/hit-effect's duration has elapsed (per the
+    pause-aware animation clock), it must be dropped, not linger."""
+    renderer = ArenaRenderer(pygame.Rect(0, 0, 400, 300))
+    surface = pygame.Surface((400, 300))
+    scale = renderer.ship_scale()
+
+    events = [
+        ev.Event(id=1, kind=ev.ATTACK, team="Team A", message="Attack successful"),
+        ev.Event(id=2, kind=ev.DAMAGE, team="Team A", message="Team B HP -12", data={"amount": 12.0}),
+    ]
+    renderer._ingest_events(events, (10.0, 10.0), (20.0, 20.0), "Team A", "Team B", 0.0)
+    assert len(renderer._projectiles) == 1
+    assert len(renderer._explosions) == 1
+
+    renderer._draw_projectiles(surface, 0.05, scale)
+    renderer._draw_explosions(surface, 0.05, scale)
+    assert len(renderer._projectiles) == 1, "still in flight, must not be dropped early"
+    assert len(renderer._explosions) == 1, "still playing, must not be dropped early"
+
+    longest = max(PROJECTILE_DURATION, EXPLOSION_DURATION) + 0.5
+    renderer._draw_projectiles(surface, longest, scale)
+    renderer._draw_explosions(surface, longest, scale)
+    assert renderer._projectiles == [], "expired projectile must be cleaned up"
+    assert renderer._explosions == [], "expired hit-effect must be cleaned up"
+
+
 if __name__ == "__main__":
     pygame.init()
     tests = [
@@ -105,6 +197,9 @@ if __name__ == "__main__":
         test_draw_still_works_with_default_team_names,
         test_draw_ignores_event_from_unrecognized_team_defensively,
         test_draw_renders_hp_and_energy_bars_without_error,
+        test_advance_clock_freezes_while_not_running,
+        test_ship_scale_matches_between_admin_and_practice_panel_sizes,
+        test_projectiles_and_explosions_are_cleaned_up_over_time,
     ]
     for fn in tests:
         print(f"{fn.__name__} ...")
